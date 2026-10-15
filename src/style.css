@@ -4,8 +4,7 @@
 
 html,
 body,
-#app,
-#game-view {
+#app {
   width: 100%;
   height: 100%;
   margin: 0;
@@ -14,7 +13,92 @@ body,
 
 body {
   min-width: 320px;
-  background: #51584b;
+  background: #101923;
+  color: #f4eee3;
+  font-family: Georgia, 'Times New Roman', serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.app-shell,
+.main-menu,
+#game-view {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.main-menu {
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.menu-art {
+  position: absolute;
+  inset: 0;
+  background-color: #172538;
+  background-image: url('/Main%20Menu.png');
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.menu-controls {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max(100vw, 177.95vh);
+  height: max(100vh, 56.2vw);
+  transform: translate(-50%, -50%);
+}
+
+.menu-hit-area {
+  position: absolute;
+  left: 39.2%;
+  width: 21.6%;
+  height: 8.8%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  clip-path: polygon(11% 0, 89% 0, 100% 50%, 89% 100%, 11% 100%, 0 50%);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.menu-hit-area:hover,
+.menu-hit-area:focus-visible {
+  outline: none;
+  background: rgb(42 170 255 / 14%);
+  filter: drop-shadow(0 0 12px rgb(56 198 255 / 80%));
+}
+
+.menu-hit-area:focus-visible {
+  background: rgb(42 170 255 / 24%);
+}
+
+.menu-play {
+  top: 46.4%;
+}
+
+.menu-settings {
+  top: 56.9%;
+}
+
+.menu-how-to-play {
+  top: 66.7%;
+}
+
+.menu-quit {
+  top: 76.1%;
 }
 
 .game-canvas {
@@ -22,4 +106,121 @@ body {
   width: 100%;
   height: 100%;
   cursor: crosshair;
+}
+
+.menu-dialog {
+  width: min(440px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  padding: 30px;
+  overflow-y: auto;
+  border: 1px solid rgb(136 194 220 / 70%);
+  border-radius: 10px;
+  background:
+    linear-gradient(145deg, rgb(27 43 59 / 98%), rgb(10 18 28 / 98%));
+  box-shadow: 0 0 0 1px rgb(11 20 30 / 90%), 0 16px 60px rgb(0 0 0 / 65%), 0 0 30px rgb(39 174 255 / 15%);
+  color: #f4eee3;
+}
+
+.menu-dialog::backdrop {
+  background: rgb(3 8 15 / 66%);
+  backdrop-filter: blur(3px);
+}
+
+.menu-dialog h1 {
+  margin: 0 0 24px;
+  color: #dff6ff;
+  font-size: 27px;
+  font-weight: 500;
+  text-align: center;
+  text-shadow: 0 0 15px rgb(62 183 255 / 55%);
+}
+
+.sensitivity-setting {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  align-items: center;
+  font-size: 16px;
+}
+
+.sensitivity-setting output {
+  color: #8de5ff;
+  font-variant-numeric: tabular-nums;
+}
+
+.sensitivity-setting input {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: #2caeff;
+}
+
+.dialog-note {
+  margin: 20px 0;
+  color: #c1c9d2;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.controls-list {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 26px;
+  padding: 0;
+  color: #d7dce2;
+  list-style: none;
+}
+
+.controls-list li {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.controls-list kbd {
+  min-width: 26px;
+  padding: 3px 6px;
+  border: 1px solid #617383;
+  border-radius: 4px;
+  background: #182633;
+  color: #eaf8ff;
+  font: inherit;
+  font-size: 13px;
+  text-align: center;
+}
+
+.dialog-button {
+  display: block;
+  min-width: 140px;
+  margin: 25px auto 0;
+  padding: 10px 22px;
+  border: 1px solid #56c5ff;
+  border-radius: 5px;
+  background: linear-gradient(#174a70, #102d4b);
+  box-shadow: 0 0 16px rgb(41 172 255 / 22%);
+  color: #f4fbff;
+  cursor: pointer;
+}
+
+.dialog-button:hover,
+.dialog-button:focus-visible {
+  background: linear-gradient(#216b97, #17456c);
+  outline: 2px solid #a5e7ff;
+  outline-offset: 3px;
+}
+
+@media (max-height: 500px) {
+  .menu-dialog {
+    max-height: calc(100vh - 24px);
+    padding: 20px;
+    overflow-y: auto;
+  }
+
+  .menu-dialog h1 {
+    margin-bottom: 14px;
+    font-size: 22px;
+  }
+
+  .dialog-button {
+    margin-top: 16px;
+  }
 }

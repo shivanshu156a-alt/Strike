@@ -8,30 +8,31 @@ export interface ArenaMap {
   ambient: number;
 }
 
+export const ARENA_GRID_SIZE = 100;
+export const GRID_UNIT_SIZE = 1;
+
 export const EMPTY_ARENA: ArenaMap = {
-  sky: 0x101519,
-  ground: 0x39443c,
-  accent: 0x647363,
-  grid: 0xc3f47c,
+  sky: 0x000000,
+  ground: 0x000000,
+  accent: 0xffffff,
+  grid: 0xffffff,
   ambient: 0xd3dfd0,
 };
 
 export function buildMap(scene: THREE.Scene, map: ArenaMap): void {
+  const floorSize = ARENA_GRID_SIZE * GRID_UNIT_SIZE;
+
   const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(84, 84),
+    new THREE.PlaneGeometry(floorSize, floorSize),
     new THREE.MeshStandardMaterial({ color: map.ground, roughness: 1 }),
   );
   floor.rotation.x = -Math.PI / 2;
   floor.position.y = -0.05;
   scene.add(floor);
 
-  const minorGrid = new THREE.GridHelper(84, 42, map.accent, map.accent);
-  minorGrid.position.y = -0.04;
-  scene.add(minorGrid);
-
-  const majorGrid = new THREE.GridHelper(84, 21, map.grid, map.grid);
-  majorGrid.position.y = -0.035;
-  scene.add(majorGrid);
+  const unitGrid = new THREE.GridHelper(floorSize, ARENA_GRID_SIZE, 0xffffff, 0xffffff);
+  unitGrid.position.y = -0.04;
+  scene.add(unitGrid);
 
   scene.add(new THREE.HemisphereLight(map.ambient, map.accent, 1.6));
   const light = new THREE.DirectionalLight(map.ambient, 1.4);
