@@ -10,6 +10,8 @@ import {
   type WeaponCombatProfile,
 } from './player';
 
+
+
 const ARENA_HALF_EXTENT = ARENA_GRID_SIZE * GRID_UNIT_SIZE / 2;
 const CROUCHING_HEIGHT = 1.05;
 const WALK_SPEED = 8;
