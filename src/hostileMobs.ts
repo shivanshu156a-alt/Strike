@@ -4,7 +4,6 @@ export interface HostileMobDefinition {
   movement:
     | 'approaches-player'
     | 'flies-and-approaches'
-    | 'flies-at-range'
     | 'random-teleport'
     | 'roams-and-holds-range'
     | 'roams-and-teleports'
@@ -24,6 +23,7 @@ export interface HostileMobDefinition {
   damagePerAttack: number;
   behavior: readonly string[];
   activationRadiusBlocks?: number;
+  attackModeLocksOnActivation?: true;
   attackAccuracyPercent?: number;
   teleport?: {
     rangeBlocks: number;
@@ -53,7 +53,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     damagePerAttack: 20,
     behavior: [
       'Immediately moves toward the player.',
-      'Attacks in close-range melee while approaching.',
+      'Telegraphs a close-range melee attack that can be dodged before impact.',
     ],
     description: 'Immediately approaches the player and attacks in close-range melee.',
   },
@@ -68,18 +68,19 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     healthPoints: 75,
     damagePerAttack: 25,
     behavior: [
-      'Roams idly while the player is outside its attack radius.',
-      'Enters attack mode when the player is within 7 blocks.',
-      'Maintains distance and fires; does not chase or use melee attacks.',
+      'Roams idly until the player comes within 5 blocks.',
+      'Locks into attack mode once the player enters the 5-block radius.',
+      'Maintains distance with short lateral strafes and fires at the player; does not chase or use melee attacks.',
     ],
-    activationRadiusBlocks: 7,
+    activationRadiusBlocks: 5,
+    attackModeLocksOnActivation: true,
     attackAccuracyPercent: 70,
     projectile: {
       speed: 'normal',
       dodgeable: true,
       defendableWithPerfectTiming: true,
     },
-    description: 'Roams outside a 7-block radius; inside it, keeps distance and fires with 70% accuracy.',
+    description: 'Roams until the player enters a 5-block radius, then strafes to hold distance and fires with 70% accuracy.',
   },
   {
     id: 'annoying-mob',
@@ -92,45 +93,32 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     attackRange: 'close',
     healthPoints: 10,
     damagePerAttack: 5,
-    behavior: ['Runs quickly toward the player and attacks in close-range melee.'],
+    behavior: [
+      'Runs quickly toward the player.',
+      'Uses a short, fast telegraph before its close-range attack.',
+    ],
     defeatedByAnyPlayerAttack: true,
     evasion: 'speed',
-    description: 'Runs very fast to approach and attack at close range; its small size and speed help it dodge player attacks.',
+    description: 'Runs very fast and attacks after a short telegraph; its small size and speed help it dodge player attacks.',
   },
   {
     id: 'flying-attacker',
     name: 'Flying Attacker',
     movement: 'flies-and-approaches',
-    movementSpeed: { type: 'variable', maximumBlocksPerSecondExclusive: 20 },
-    dimensions: { length: 1.3, width: 0.4, height: 0.67 },
+    movementSpeed: { type: 'variable', maximumBlocksPerSecondExclusive: 18 },
+    dimensions: { length: 1.3, width: 0.67, height: 0.4 },
     attack: 'stinging',
     attackRange: 'close',
     healthPoints: 60,
     damagePerAttack: 10,
     behavior: [
-      'Roams above the player.',
-      'Dives quickly toward the player and attacks, damaging them.',
-      'Flies away after attacking.',
+      'Roams above and around the player.',
+      'Dives to player height and attacks from in front of the player.',
+      'After attacking, slowly roams around the player at player height.',
+      'Then rapidly flies upward and resumes roaming above the player.',
     ],
     evasion: 'flight',
-    description: 'Roams above the player, dives to attack, then flies away.',
-  },
-  {
-    id: 'flying-shooter',
-    name: 'Flying Shooter',
-    movement: 'flies-at-range',
-    movementSpeed: { type: 'variable', maximumBlocksPerSecondExclusive: 20 },
-    dimensions: { length: 1.3, width: 0.4, height: 0.67 },
-    attack: 'projectile',
-    attackRange: 'long',
-    healthPoints: 60,
-    damagePerAttack: 10,
-    behavior: [
-      'Roams in the sky while keeping away from the player.',
-      'Fires projectiles while roaming.',
-    ],
-    attackAccuracyPercent: 50,
-    description: 'Keeps away from the player, roaming in the sky and firing with 50% accuracy.',
+    description: 'Roams above and around the player, dives to attack from the front, slowly roams at player height, then rapidly flies upward.',
   },
   {
     id: 'teleporting-ghost',
@@ -138,8 +126,8 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     movement: 'roams-and-teleports',
     movementSpeed: { type: 'variable', maximumBlocksPerSecondExclusive: 14 },
     dimensions: { length: 0.6, width: 0.99, height: 3.4 },
-    attack: 'unspecified',
-    attackRange: 'unspecified',
+    attack: 'hand-to-hand',
+    attackRange: 'close',
     healthPoints: 130,
     damagePerAttack: 20,
     behavior: [
@@ -150,7 +138,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     teleport: {
       rangeBlocks: 10,
       triggeredByPlayerAttack: true,
-      blockedWhenPlayerHitIntervalUnderSeconds: 1.37,
+      blockedWhenPlayerHitIntervalUnderSeconds: 0.4,
     },
     description: 'Roams idly until attacked, then teleports near and attacks the player; rapid player hits can block teleporting.',
   },

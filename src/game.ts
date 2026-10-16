@@ -1,6 +1,14 @@
 import * as THREE from 'three';
 import { ARENA_GRID_SIZE, GRID_UNIT_SIZE, buildMap, type ArenaMap } from './maps';
-import { Player, type PlayerHealthChange, type WeaponCombatProfile } from './player';
+import { HOSTILE_MOBS } from './hostileMobs';
+import { HostileMob, type HostileMobHealth } from './hostileMob';
+import {
+  Player,
+  PLAYER_ATTACKS,
+  type PlayerAttackId,
+  type PlayerHealthChange,
+  type WeaponCombatProfile,
+} from './player';
 
 const ARENA_HALF_EXTENT = ARENA_GRID_SIZE * GRID_UNIT_SIZE / 2;
 const CROUCHING_HEIGHT = 1.05;
@@ -9,6 +17,15 @@ const SPRINT_SPEED = 14;
 const CROUCH_SPEED = 4;
 const JUMP_SPEED = 7;
 const GRAVITY = 20;
+const MINIMUM_HOSTILE_SPAWN_DISTANCE = 7;
+
+interface PlayerProjectile {
+  mesh: THREE.Mesh;
+  direction: THREE.Vector3;
+  remainingRange: number;
+  speed: number;
+  damage: number;
+}
 
 export type GameAction =
   | 'reload'
@@ -35,8 +52,25 @@ export class Game {
 
   private readonly scene = new THREE.Scene();
   private readonly clock = new THREE.Clock();
+  private readonly raycaster = new THREE.Raycaster();
   private readonly canvas: HTMLCanvasElement;
   private readonly playerMesh: THREE.Mesh;
+  private readonly playerProjectiles: PlayerProjectile[] = [];
+  private readonly hud: HTMLElement;
+  private readonly attackStatus: HTMLElement;
+  private readonly spawnProtectionMessage: HTMLElement;
+  private readonly gameOverMessage: HTMLElement;
+  private readonly playerHealthElements: {
+    label: HTMLElement;
+    track: HTMLElement;
+    fill: HTMLElement;
+  };
+  private readonly mobHealthRows = new Map<string, {
+    card: HTMLElement;
+    fill: HTMLElement;
+    label: HTMLElement;
+  }>();
+  private readonly hostileMobs: HostileMob[] = [];
   private readonly keys = new Set<string>();
   private readonly velocity = new THREE.Vector3();
   private readonly playerPosition = new THREE.Vector3(0, 0, 5);
@@ -49,12 +83,21 @@ export class Game {
   private mouseFallback = false;
   private animationFrame = 0;
   private disposed = false;
+  private gameOver = false;
+  private paused = true;
+  private nextAttackAt = 0;
 
   constructor(container: HTMLElement, map: ArenaMap, lookSensitivity = 1) {
     this.lookSensitivity = lookSensitivity;
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'game-canvas';
     container.appendChild(this.canvas);
+    const hudElements = this.createHud(container);
+    this.hud = hudElements.hud;
+    this.attackStatus = hudElements.attackStatus;
+    this.spawnProtectionMessage = hudElements.spawnProtectionMessage;
+    this.gameOverMessage = hudElements.gameOverMessage;
+    this.playerHealthElements = hudElements.playerHealth;
 
     this.player.addEventListener('healthchange', this.onPlayerHealthChange);
 
@@ -77,6 +120,7 @@ export class Game {
     this.scene.add(this.playerMesh);
 
     buildMap(this.scene, map);
+    this.spawnHostileMobs();
     this.attachEvents();
     this.updateCamera(0);
     this.animate();
@@ -93,6 +137,7 @@ export class Game {
     document.removeEventListener('mouseup', this.onMouseUp);
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     this.player.removeEventListener('healthchange', this.onPlayerHealthChange);
+    this.hostileMobs.forEach((mob) => mob.dispose());
     window.removeEventListener('resize', this.onResize);
     window.removeEventListener('blur', this.clearKeys);
     this.canvas.removeEventListener('click', this.onCanvasClick);
@@ -100,15 +145,140 @@ export class Game {
     this.canvas.removeEventListener('contextmenu', this.onContextMenu);
     this.renderer.dispose();
     if (document.pointerLockElement === this.canvas) document.exitPointerLock();
-    this.scene.remove(this.playerMesh);
-    this.playerMesh.geometry.dispose();
-    const playerMaterial = this.playerMesh.material;
-    if (Array.isArray(playerMaterial)) {
-      playerMaterial.forEach((material) => material.dispose());
-    } else {
-      playerMaterial.dispose();
+    for (let index = this.playerProjectiles.length - 1; index >= 0; index -= 1) {
+      this.removePlayerProjectile(index);
     }
+    this.scene.traverse((object) => {
+      if (!(object instanceof THREE.Mesh || object instanceof THREE.Line)) return;
+      object.geometry.dispose();
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      materials.forEach((material) => material.dispose());
+    });
+    this.scene.clear();
     this.canvas.remove();
+    this.hud.remove();
+  }
+
+  private createHud(container: HTMLElement): {
+    hud: HTMLElement;
+    gameOverMessage: HTMLElement;
+    spawnProtectionMessage: HTMLElement;
+    attackStatus: HTMLElement;
+    playerHealth: { label: HTMLElement; track: HTMLElement; fill: HTMLElement };
+  } {
+    const hud = document.createElement('aside');
+    hud.className = 'game-hud';
+    hud.setAttribute('aria-label', 'Game status');
+
+    const crosshair = document.createElement('div');
+    crosshair.className = 'game-crosshair';
+    crosshair.setAttribute('aria-hidden', 'true');
+    hud.appendChild(crosshair);
+
+    const attackStatus = document.createElement('div');
+    attackStatus.className = 'combat-note attack-status';
+    attackStatus.setAttribute('aria-live', 'polite');
+    hud.appendChild(attackStatus);
+    this.updateAttackStatus(attackStatus);
+
+    const spawnProtectionMessage = document.createElement('div');
+    spawnProtectionMessage.className = 'spawn-protection-message';
+    spawnProtectionMessage.setAttribute('role', 'status');
+    spawnProtectionMessage.textContent = 'Spawn protected — click the game to start.';
+    hud.appendChild(spawnProtectionMessage);
+
+    const gameOverMessage = document.createElement('div');
+    gameOverMessage.className = 'game-over-message';
+    gameOverMessage.setAttribute('role', 'status');
+    gameOverMessage.textContent = 'Defeated — press Esc to return to the menu.';
+    gameOverMessage.hidden = true;
+    hud.appendChild(gameOverMessage);
+
+    const playerHealth = document.createElement('div');
+    playerHealth.className = 'player-health';
+    const playerHealthLabel = document.createElement('div');
+    playerHealthLabel.className = 'mob-health-label';
+    playerHealthLabel.textContent = `Player: ${this.player.health} / ${this.player.maxHealth}`;
+    const playerHealthTrack = document.createElement('div');
+    playerHealthTrack.className = 'mob-health-track';
+    playerHealthTrack.setAttribute('role', 'progressbar');
+    playerHealthTrack.setAttribute('aria-label', 'Player health');
+    playerHealthTrack.setAttribute('aria-valuemin', '0');
+    playerHealthTrack.setAttribute('aria-valuemax', String(this.player.maxHealth));
+    playerHealthTrack.setAttribute('aria-valuenow', String(this.player.health));
+    const playerHealthFill = document.createElement('div');
+    playerHealthFill.className = 'player-health-fill';
+    playerHealthTrack.appendChild(playerHealthFill);
+    playerHealth.append(playerHealthLabel, playerHealthTrack);
+    hud.appendChild(playerHealth);
+
+    const mobList = document.createElement('div');
+    mobList.className = 'mob-health-list';
+    mobList.setAttribute('aria-label', 'Hostile mob health');
+
+    for (const definition of HOSTILE_MOBS) {
+      const card = document.createElement('div');
+      card.className = 'mob-health-card';
+      const label = document.createElement('div');
+      label.className = 'mob-health-label';
+      label.textContent = `${definition.name}: ${definition.healthPoints} / ${definition.healthPoints}`;
+      const track = document.createElement('div');
+      track.className = 'mob-health-track';
+      const fill = document.createElement('div');
+      fill.className = `mob-health-fill mob-health-${definition.id}`;
+      track.appendChild(fill);
+      card.append(label, track);
+      mobList.appendChild(card);
+      this.mobHealthRows.set(definition.id, { card, fill, label });
+    }
+
+    hud.appendChild(mobList);
+    container.appendChild(hud);
+    return {
+      hud,
+      gameOverMessage,
+      spawnProtectionMessage,
+      attackStatus,
+      playerHealth: {
+        label: playerHealthLabel,
+        track: playerHealthTrack,
+        fill: playerHealthFill,
+      },
+    };
+  }
+
+  private spawnHostileMobs(): void {
+    const spawnRadius = Math.max(14, MINIMUM_HOSTILE_SPAWN_DISTANCE);
+    HOSTILE_MOBS.forEach((definition, index) => {
+      const angle = (index / HOSTILE_MOBS.length) * Math.PI * 2;
+      const flying = definition.id === 'flying-attacker';
+      const position = new THREE.Vector3(
+        this.playerPosition.x + Math.cos(angle) * spawnRadius,
+        flying ? this.playerPosition.y + 7 : definition.dimensions.height / 2,
+        this.playerPosition.z + Math.sin(angle) * spawnRadius,
+      );
+      this.hostileMobs.push(new HostileMob(
+        definition,
+        this.scene,
+        position,
+        (damage) => this.player.takeDamage(damage),
+        (health) => this.updateMobHealth(health),
+      ));
+    });
+  }
+
+  private updateMobHealth(health: HostileMobHealth): void {
+    const row = this.mobHealthRows.get(health.id);
+    if (!row) return;
+    row.label.textContent = health.defeated
+      ? `${health.name}: Defeated`
+      : `${health.name}: ${health.health} / ${health.maxHealth}`;
+    row.fill.style.width = `${(health.health / health.maxHealth) * 100}%`;
+    row.card.classList.toggle('is-defeated', health.defeated);
+  }
+
+  private updateHostileMobs(delta: number): void {
+    for (const mob of this.hostileMobs) mob.update(delta, this.playerPosition, this.yaw);
   }
 
   private attachEvents(): void {
@@ -126,12 +296,21 @@ export class Game {
   }
 
   private onKeyDown = (event: KeyboardEvent): void => {
+    if (this.gameOver) return;
+    if (event.repeat) return;
+
+    const attackSlot = this.getAttackSlot(event.code);
+    if (attackSlot !== undefined) {
+      this.selectAttack(attackSlot);
+      return;
+    }
+    if (this.paused) return;
+
     if (event.code === 'Space') {
       event.preventDefault();
       this.jumpHeld = true;
       return;
     }
-    if (event.repeat) return;
 
     if (event.code === 'KeyL') {
       this.toggleCameraView();
@@ -173,10 +352,92 @@ export class Game {
   };
 
   private onMouseDown = (event: MouseEvent): void => {
-    if (event.target !== this.canvas) return;
-    if (event.button === 0) this.emitAction('attack', true);
+    if (this.gameOver || this.paused || event.target !== this.canvas) return;
+    if (event.button === 0) {
+      this.emitAction('attack', true);
+      this.performAttack();
+    }
     if (event.button === 2) this.emitAction('focus', true);
   };
+
+  private performAttack(): void {
+    const attack = this.player.selectedAttack;
+    const now = performance.now();
+    if (now < this.nextAttackAt) return;
+    this.nextAttackAt = now + attack.attackCooldownSeconds * 1000;
+
+    this.camera.updateMatrixWorld(true);
+    const direction = this.camera.getWorldDirection(new THREE.Vector3()).normalize();
+    if (attack.mode === 'melee') {
+      this.raycaster.set(this.camera.position, direction);
+      this.raycaster.far = attack.attackRange;
+      const targets = this.hostileMobs
+        .filter((mob) => !mob.isDefeated)
+        .map((mob) => {
+          mob.mesh.updateMatrixWorld(true);
+          return mob.mesh;
+        });
+      const [hit] = this.raycaster.intersectObjects(targets, false);
+      if (hit) {
+        this.hostileMobs.find((mob) => mob.mesh === hit.object)
+          ?.takeDamage(attack.attackDamage);
+      }
+      return;
+    }
+
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xffe29a,
+      toneMapped: false,
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 10), material);
+    mesh.position.copy(this.camera.position).addScaledVector(direction, 0.45);
+    this.scene.add(mesh);
+    this.playerProjectiles.push({
+      mesh,
+      direction,
+      remainingRange: attack.attackRange,
+      speed: attack.projectileSpeed ?? 35,
+      damage: attack.attackDamage,
+    });
+  }
+
+  private updatePlayerProjectiles(delta: number): void {
+    for (let index = this.playerProjectiles.length - 1; index >= 0; index -= 1) {
+      const projectile = this.playerProjectiles[index];
+      const step = Math.min(
+        projectile.speed * delta,
+        projectile.remainingRange,
+      );
+      this.raycaster.set(projectile.mesh.position, projectile.direction);
+      this.raycaster.far = step + 0.12;
+      const targets = this.hostileMobs
+        .filter((mob) => !mob.isDefeated)
+        .map((mob) => {
+          mob.mesh.updateMatrixWorld(true);
+          return mob.mesh;
+        });
+      const [hit] = this.raycaster.intersectObjects(targets, false);
+      if (hit) {
+        this.hostileMobs.find((mob) => mob.mesh === hit.object)
+          ?.takeDamage(projectile.damage);
+        this.removePlayerProjectile(index);
+        continue;
+      }
+
+      projectile.mesh.position.addScaledVector(projectile.direction, step);
+      projectile.remainingRange -= step;
+      if (projectile.remainingRange <= 0) this.removePlayerProjectile(index);
+    }
+  }
+
+  private removePlayerProjectile(index: number): void {
+    const [projectile] = this.playerProjectiles.splice(index, 1);
+    this.scene.remove(projectile.mesh);
+    projectile.mesh.geometry.dispose();
+    const material = projectile.mesh.material;
+    if (Array.isArray(material)) material.forEach((item) => item.dispose());
+    else material.dispose();
+  }
 
   private onMouseUp = (event: MouseEvent): void => {
     if (event.button === 0) this.emitAction('attack', false);
@@ -185,7 +446,10 @@ export class Game {
 
   private onWheel = (event: WheelEvent): void => {
     event.preventDefault();
-    if (event.deltaY !== 0) this.emitAction('weapon-swap', Math.sign(event.deltaY));
+    if (event.deltaY === 0) return;
+    const direction = Math.sign(event.deltaY);
+    this.selectAttack((this.player.selectedAttackIndex + direction + PLAYER_ATTACKS.length) % PLAYER_ATTACKS.length);
+    this.emitAction('weapon-swap', direction);
   };
 
   private onContextMenu = (event: MouseEvent): void => {
@@ -205,6 +469,25 @@ export class Game {
     return match ? Number(match[1]) : undefined;
   }
 
+  private getAttackSlot(code: string): number | undefined {
+    const match = /^(?:Digit|Numpad)([1-3])$/.exec(code);
+    return match ? Number(match[1]) - 1 : undefined;
+  }
+
+  private selectAttack(index: number): void {
+    if (!this.player.selectAttack(index)) return;
+    this.updateAttackStatus(this.attackStatus);
+    this.canvas.dispatchEvent(new CustomEvent<{ id: PlayerAttackId; index: number }>('attackselect', {
+      bubbles: true,
+      detail: { id: this.player.selectedAttack.id, index },
+    }));
+  }
+
+  private updateAttackStatus(element: HTMLElement): void {
+    const attack = this.player.selectedAttack;
+    element.textContent = `Selected: ${attack.name} (${attack.attackDamage} damage) — 1–3 or scroll`;
+  }
+
   private isCrouching(): boolean {
     return this.keys.has('ControlLeft') || this.keys.has('ControlRight');
   }
@@ -219,6 +502,14 @@ export class Game {
 
   private onPlayerHealthChange = (event: Event): void => {
     const { health, maxHealth } = (event as CustomEvent<PlayerHealthChange>).detail;
+    this.playerHealthElements.label.textContent = `Player: ${health} / ${maxHealth}`;
+    this.playerHealthElements.track.setAttribute('aria-valuenow', String(health));
+    this.playerHealthElements.fill.style.width = `${(health / maxHealth) * 100}%`;
+    if (health === 0 && !this.gameOver) {
+      this.gameOver = true;
+      this.gameOverMessage.hidden = false;
+      this.clearKeys();
+    }
     this.canvas.dispatchEvent(new CustomEvent<PlayerHealthChange>('playerhealthchange', {
       bubbles: true,
       detail: { health, maxHealth },
@@ -245,8 +536,12 @@ export class Game {
   };
 
   private onCanvasClick = (): void => {
-    if (document.pointerLockElement === this.canvas) return;
-    void this.requestPointerLock();
+    if (this.gameOver) return;
+    if (this.paused) {
+      this.paused = false;
+      this.spawnProtectionMessage.hidden = true;
+    }
+    if (document.pointerLockElement !== this.canvas) void this.requestPointerLock();
   };
 
   private async requestPointerLock(): Promise<void> {
@@ -324,28 +619,29 @@ export class Game {
     this.playerMesh.rotation.y = this.yaw;
     this.playerMesh.visible = this.cameraView === 'floating';
 
-    const focusPoint = this.playerPosition.clone().add(new THREE.Vector3(0, targetHeight * 0.58, 0));
     if (this.cameraView === 'first-person') {
-      this.camera.position.copy(this.playerPosition).add(new THREE.Vector3(0, targetHeight, 0));
+      this.camera.position.copy(this.playerPosition).add(new THREE.Vector3(0, targetHeight * 0.9, 0));
       this.camera.rotation.set(this.pitch, this.yaw, 0);
       return;
     }
 
     const cameraDistance = 5;
-    const cameraPitch = this.pitch * 0.55 + 0.3;
-    const horizontalDistance = cameraDistance * Math.cos(cameraPitch);
     this.camera.position.set(
-      this.playerPosition.x - Math.sin(this.yaw) * horizontalDistance,
-      this.playerPosition.y + 2.5 + cameraDistance * Math.sin(cameraPitch),
-      this.playerPosition.z + Math.cos(this.yaw) * horizontalDistance,
+      this.playerPosition.x - Math.sin(this.yaw) * cameraDistance,
+      this.playerPosition.y + targetHeight + 0.35,
+      this.playerPosition.z + Math.cos(this.yaw) * cameraDistance,
     );
-    this.camera.lookAt(focusPoint);
+    this.camera.rotation.set(this.pitch, this.yaw, 0);
   }
 
   private animate = (): void => {
     if (this.disposed) return;
     const delta = Math.min(this.clock.getDelta(), 0.05);
-    this.updateCamera(delta);
+    if (!this.paused && !this.gameOver) {
+      this.updateCamera(delta);
+      this.updatePlayerProjectiles(delta);
+      this.updateHostileMobs(delta);
+    }
     this.renderer.render(this.scene, this.camera);
     this.animationFrame = requestAnimationFrame(this.animate);
   };

@@ -37,15 +37,12 @@ app.innerHTML = `
           <li><kbd>Shift</kbd> Sprint <span aria-hidden="true">·</span> <kbd>Ctrl</kbd> Crouch</li>
           <li><kbd>Space</kbd> Jump</li>
           <li><kbd>L</kbd> Toggle First Person / Floating Camera</li>
-          <li><kbd>R</kbd> Reload <span aria-hidden="true">·</span> <kbd>Q</kbd> Defence</li>
-          <li><kbd>E</kbd> Equip dropped item</li>
-          <li><kbd>B</kbd> Special ability</li>
-          <li><kbd>Left click</kbd> Shoot / attack</li>
-          <li><kbd>Right click</kbd> Zoom / focus</li>
-          <li><kbd>Scroll</kbd> Swap weapons</li>
-          <li><kbd>1–9</kbd> Switch element</li>
+          <li>Click the game to start (you are safe until then); move the mouse to look around</li>
+          <li><kbd>1</kbd> Fists <span aria-hidden="true">·</span> <kbd>2</kbd> Melee <span aria-hidden="true">·</span> <kbd>3</kbd> Shooter (10 damage each)</li>
+          <li>Scroll the mouse wheel to change attacks; left click to attack</li>
           <li><kbd>Esc</kbd> Return to menu</li>
         </ul>
+        <p class="dialog-note">Hostile mobs are active. Player defence is not implemented yet.</p>
         <button class="dialog-button" type="submit">Back</button>
       </form>
     </dialog>

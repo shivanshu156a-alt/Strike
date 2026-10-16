@@ -108,6 +108,120 @@ input {
   cursor: crosshair;
 }
 
+.game-hud {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  display: grid;
+  gap: 8px;
+  width: min(300px, calc(100vw - 32px));
+  padding: 12px;
+  border: 1px solid rgb(136 194 220 / 45%);
+  border-radius: 8px;
+  background: rgb(10 18 28 / 78%);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 32%);
+  color: #f4eee3;
+  font: 13px/1.35 Arial, sans-serif;
+  pointer-events: none;
+}
+
+.game-crosshair {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 18px;
+  height: 18px;
+  transform: translate(-50%, -50%);
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 90%));
+}
+
+.game-crosshair::before,
+.game-crosshair::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border-radius: 1px;
+  background: #fff;
+  content: '';
+  transform: translate(-50%, -50%);
+}
+
+.game-crosshair::before {
+  width: 2px;
+  height: 18px;
+}
+
+.game-crosshair::after {
+  width: 18px;
+  height: 2px;
+}
+
+.combat-note {
+  color: #c1c9d2;
+  font-size: 12px;
+}
+
+.spawn-protection-message {
+  color: #8de5ff;
+  font-weight: 700;
+}
+
+.game-over-message {
+  color: #ff9086;
+  font-weight: 700;
+}
+
+.mob-health-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 10px;
+}
+
+.mob-health-card {
+  min-width: 0;
+}
+
+.mob-health-label {
+  overflow: hidden;
+  margin-bottom: 3px;
+  color: #e3e9ef;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mob-health-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 18%);
+}
+
+.player-health-fill {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: #54c878;
+  transition: width 160ms ease;
+}
+
+.mob-health-fill {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  transition: width 160ms ease;
+}
+
+.mob-health-normal-melee-attacker { background: #d95745; }
+.mob-health-shooter { background: #5686d8; }
+.mob-health-annoying-mob { background: #f1c342; }
+.mob-health-flying-attacker { background: #54c878; }
+.mob-health-teleporting-ghost { background: #a66be0; }
+
+.mob-health-card.is-defeated {
+  opacity: 0.48;
+}
+
 .menu-dialog {
   width: min(440px, calc(100vw - 40px));
   max-height: calc(100vh - 40px);
