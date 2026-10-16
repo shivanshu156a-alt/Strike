@@ -39,7 +39,7 @@ export class HostileMob {
 
   private readonly scene: THREE.Scene;
   private readonly projectiles: HostileProjectile[] = [];
-  private readonly onPlayerDamage: (amount: number) => void;
+  private readonly onPlayerDamage: (amount: number, attackDirection: THREE.Vector3) => void;
   private readonly onHealthChange: (health: HostileMobHealth) => void;
   private readonly roamTarget = new THREE.Vector3();
   private readonly retreatTarget = new THREE.Vector3();
@@ -49,6 +49,9 @@ export class HostileMob {
   private readonly projectileSegment = new THREE.Vector3();
   private readonly toPlayerFromProjectileStart = new THREE.Vector3();
   private readonly closestProjectilePoint = new THREE.Vector3();
+  private readonly knockbackVelocity = new THREE.Vector3();
+  private readonly knockbackDirection = new THREE.Vector3();
+  private readonly attackDirection = new THREE.Vector3();
   private currentHealth: number;
   private attackCooldown = Math.random() * 0.8;
   private attackWindupRemaining = 0;
@@ -56,6 +59,7 @@ export class HostileMob {
   private roamTimer = 0;
   private strafeTimer = 0;
   private strafeDirection = Math.random() < 0.5 ? -1 : 1;
+  private defeatKnockbackRemaining = 0;
   private elapsed = 0;
   private state: FlyingAttackerState = 'roaming';
   private attackModeLocked = false;
@@ -68,7 +72,7 @@ export class HostileMob {
     definition: HostileMobDefinition,
     scene: THREE.Scene,
     position: THREE.Vector3,
-    onPlayerDamage: (amount: number) => void,
+    onPlayerDamage: (amount: number, attackDirection: THREE.Vector3) => void,
     onHealthChange: (health: HostileMobHealth) => void,
   ) {
     this.definition = definition;
@@ -106,7 +110,10 @@ export class HostileMob {
     return this.currentHealth <= 0;
   }
 
-  takeDamage(amount = TEST_SHOOTER_WEAPON.attackDamage): void {
+  takeDamage(
+    amount = TEST_SHOOTER_WEAPON.attackDamage,
+    knockbackDirection?: THREE.Vector3,
+  ): void {
     if (!Number.isFinite(amount) || amount < 0) {
       throw new RangeError('Mob damage must be a finite, non-negative number.');
     }
@@ -115,13 +122,24 @@ export class HostileMob {
     this.currentHealth = this.definition.defeatedByAnyPlayerAttack
       ? 0
       : Math.max(0, this.currentHealth - amount);
+    if (knockbackDirection) {
+      this.knockbackDirection.copy(knockbackDirection).normalize();
+      this.knockbackVelocity.addScaledVector(this.knockbackDirection, 5);
+    }
     if (this.definition.id === 'teleporting-ghost') this.registerGhostHit();
     this.emitHealth();
-    if (this.isDefeated) this.removeFromScene();
+    if (this.isDefeated) {
+      if (knockbackDirection) this.defeatKnockbackRemaining = 0.22;
+      else this.removeFromScene();
+    }
   }
 
   update(delta: number, playerPosition: THREE.Vector3, playerYaw = 0): void {
-    if (this.disposed || this.isDefeated) return;
+    if (this.disposed) return;
+    if (this.isDefeated) {
+      this.updateDefeatKnockback(delta);
+      return;
+    }
     this.elapsed += delta;
     this.attackCooldown = Math.max(0, this.attackCooldown - delta);
     this.fireCooldown = Math.max(0, this.fireCooldown - delta);
@@ -146,11 +164,43 @@ export class HostileMob {
     }
 
     this.updateProjectiles(delta, playerPosition);
-    this.mesh.position.copy(this.position);
+    this.applyKnockback(delta);
   }
 
   dispose(): void {
     this.removeFromScene();
+  }
+
+  private updateDefeatKnockback(delta: number): void {
+    if (this.defeatKnockbackRemaining <= 0) {
+      this.removeFromScene();
+      return;
+    }
+
+    this.defeatKnockbackRemaining -= delta;
+    this.applyKnockback(delta);
+    if (this.defeatKnockbackRemaining <= 0) this.removeFromScene();
+  }
+
+  private applyKnockback(delta: number): void {
+    this.position.addScaledVector(this.knockbackVelocity, delta);
+    this.knockbackVelocity.multiplyScalar(Math.exp(-5 * delta));
+    const horizontalRadius = Math.hypot(
+      this.definition.dimensions.width,
+      this.definition.dimensions.length,
+    ) / 2;
+    this.position.x = THREE.MathUtils.clamp(
+      this.position.x,
+      -ARENA_HALF_EXTENT + horizontalRadius,
+      ARENA_HALF_EXTENT - horizontalRadius,
+    );
+    this.position.z = THREE.MathUtils.clamp(
+      this.position.z,
+      -ARENA_HALF_EXTENT + horizontalRadius,
+      ARENA_HALF_EXTENT - horizontalRadius,
+    );
+    this.mesh.position.copy(this.position);
+    this.mesh.updateMatrixWorld(true);
   }
 
   private updateMeleeChaser(delta: number, playerPosition: THREE.Vector3): void {
@@ -170,7 +220,8 @@ export class HostileMob {
 
       this.setAttackTelegraph(false);
       if (this.horizontalDistanceTo(playerPosition) > MELEE_ATTACK_RADIUS) return;
-      this.onPlayerDamage(this.definition.damagePerAttack);
+      this.attackDirection.copy(playerPosition).sub(this.position).setY(0).normalize();
+      this.onPlayerDamage(this.definition.damagePerAttack, this.attackDirection);
       this.attackCooldown = this.definition.id === 'annoying-mob' ? 0.8 : 1.1;
       return;
     }
@@ -252,7 +303,8 @@ export class HostileMob {
       target.y += 0.9;
       this.moveToward(delta, target, 9);
       if (this.position.distanceTo(target) <= MELEE_ATTACK_RADIUS) {
-        this.onPlayerDamage(this.definition.damagePerAttack);
+        this.attackDirection.copy(playerPosition).sub(this.position).normalize();
+        this.onPlayerDamage(this.definition.damagePerAttack, this.attackDirection);
         this.state = 'ground-roaming';
         this.roamTimer = 2 + Math.random() * 1.2;
         this.chooseGroundRoamTarget(playerPosition);
@@ -308,7 +360,8 @@ export class HostileMob {
 
     this.face(playerPosition);
     if (this.attackCooldown === 0) {
-      this.onPlayerDamage(this.definition.damagePerAttack);
+      this.attackDirection.copy(playerPosition).sub(this.position).setY(0).normalize();
+      this.onPlayerDamage(this.definition.damagePerAttack, this.attackDirection);
       this.attackCooldown = 1.6;
       this.attemptGhostTeleport(playerPosition);
     }
@@ -402,7 +455,7 @@ export class HostileMob {
         .addScaledVector(this.projectileSegment, projection);
 
       if (this.closestProjectilePoint.distanceToSquared(this.playerHitCenter) <= PLAYER_HIT_RADIUS ** 2) {
-        this.onPlayerDamage(projectile.damage);
+        this.onPlayerDamage(projectile.damage, projectile.velocity);
         this.removeProjectile(index);
         continue;
       }

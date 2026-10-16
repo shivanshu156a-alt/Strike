@@ -18,6 +18,10 @@ const CROUCH_SPEED = 4;
 const JUMP_SPEED = 7;
 const GRAVITY = 20;
 const MINIMUM_HOSTILE_SPAWN_DISTANCE = 7;
+const DEATH_CINEMATIC_DURATION = 5;
+const DEATH_SLOW_MOTION_SCALE = 0.2;
+const PLAYER_KNOCKBACK_FORCE = 5;
+const CAMERA_HIT_TILT = 0.24;
 
 interface PlayerProjectile {
   mesh: THREE.Mesh;
@@ -59,7 +63,7 @@ export class Game {
   private readonly hud: HTMLElement;
   private readonly attackStatus: HTMLElement;
   private readonly spawnProtectionMessage: HTMLElement;
-  private readonly gameOverMessage: HTMLElement;
+  private readonly deathScreen: HTMLElement;
   private readonly playerHealthElements: {
     label: HTMLElement;
     track: HTMLElement;
@@ -73,17 +77,26 @@ export class Game {
   private readonly hostileMobs: HostileMob[] = [];
   private readonly keys = new Set<string>();
   private readonly velocity = new THREE.Vector3();
+  private readonly knockbackVelocity = new THREE.Vector3();
   private readonly playerPosition = new THREE.Vector3(0, 0, 5);
+  private readonly hitDirection = new THREE.Vector3();
+  private readonly movementDirection = new THREE.Vector3();
+  private readonly playerRight = new THREE.Vector3();
+  private readonly deathCameraStartPosition = new THREE.Vector3();
+  private readonly deathCameraPosition = new THREE.Vector3();
+  private readonly deathCameraLookTarget = new THREE.Vector3();
   private readonly lookSensitivity: number;
   private cameraView: CameraView = 'first-person';
   private jumpHeld = false;
   private verticalVelocity = 0;
   private yaw = 0;
   private pitch = 0;
+  private cameraRoll = 0;
   private mouseFallback = false;
   private animationFrame = 0;
   private disposed = false;
   private gameOver = false;
+  private deathElapsed = 0;
   private paused = true;
   private nextAttackAt = 0;
 
@@ -96,7 +109,7 @@ export class Game {
     this.hud = hudElements.hud;
     this.attackStatus = hudElements.attackStatus;
     this.spawnProtectionMessage = hudElements.spawnProtectionMessage;
-    this.gameOverMessage = hudElements.gameOverMessage;
+    this.deathScreen = hudElements.deathScreen;
     this.playerHealthElements = hudElements.playerHealth;
 
     this.player.addEventListener('healthchange', this.onPlayerHealthChange);
@@ -157,11 +170,12 @@ export class Game {
     this.scene.clear();
     this.canvas.remove();
     this.hud.remove();
+    this.deathScreen.remove();
   }
 
   private createHud(container: HTMLElement): {
     hud: HTMLElement;
-    gameOverMessage: HTMLElement;
+    deathScreen: HTMLElement;
     spawnProtectionMessage: HTMLElement;
     attackStatus: HTMLElement;
     playerHealth: { label: HTMLElement; track: HTMLElement; fill: HTMLElement };
@@ -187,12 +201,20 @@ export class Game {
     spawnProtectionMessage.textContent = 'Spawn protected — click the game to start.';
     hud.appendChild(spawnProtectionMessage);
 
-    const gameOverMessage = document.createElement('div');
-    gameOverMessage.className = 'game-over-message';
-    gameOverMessage.setAttribute('role', 'status');
-    gameOverMessage.textContent = 'Defeated — press Esc to return to the menu.';
-    gameOverMessage.hidden = true;
-    hud.appendChild(gameOverMessage);
+    const deathScreen = document.createElement('div');
+    deathScreen.className = 'death-screen';
+    deathScreen.setAttribute('role', 'status');
+    deathScreen.setAttribute('aria-live', 'assertive');
+    deathScreen.hidden = true;
+    const deathCard = document.createElement('div');
+    deathCard.className = 'death-card';
+    const deathTitle = document.createElement('h1');
+    deathTitle.textContent = 'Dead';
+    const deathPrompt = document.createElement('p');
+    deathPrompt.textContent = 'Press Esc to return to the menu';
+    deathCard.append(deathTitle, deathPrompt);
+    deathScreen.appendChild(deathCard);
+    container.appendChild(deathScreen);
 
     const playerHealth = document.createElement('div');
     playerHealth.className = 'player-health';
@@ -236,7 +258,7 @@ export class Game {
     container.appendChild(hud);
     return {
       hud,
-      gameOverMessage,
+      deathScreen,
       spawnProtectionMessage,
       attackStatus,
       playerHealth: {
@@ -261,7 +283,7 @@ export class Game {
         definition,
         this.scene,
         position,
-        (damage) => this.player.takeDamage(damage),
+        (damage, attackDirection) => this.onHostileHitPlayer(damage, attackDirection),
         (health) => this.updateMobHealth(health),
       ));
     });
@@ -380,7 +402,7 @@ export class Game {
       const [hit] = this.raycaster.intersectObjects(targets, false);
       if (hit) {
         this.hostileMobs.find((mob) => mob.mesh === hit.object)
-          ?.takeDamage(attack.attackDamage);
+          ?.takeDamage(attack.attackDamage, direction);
       }
       return;
     }
@@ -419,7 +441,7 @@ export class Game {
       const [hit] = this.raycaster.intersectObjects(targets, false);
       if (hit) {
         this.hostileMobs.find((mob) => mob.mesh === hit.object)
-          ?.takeDamage(projectile.damage);
+          ?.takeDamage(projectile.damage, projectile.direction);
         this.removePlayerProjectile(index);
         continue;
       }
@@ -485,7 +507,7 @@ export class Game {
 
   private updateAttackStatus(element: HTMLElement): void {
     const attack = this.player.selectedAttack;
-    element.textContent = `Selected: ${attack.name} (${attack.attackDamage} damage) — 1–3 or scroll`;
+    element.textContent = `Selected: ${attack.name} (${attack.attackDamage} damage, ${attack.attackRange} range) — 1–3 or scroll`;
   }
 
   private isCrouching(): boolean {
@@ -507,7 +529,10 @@ export class Game {
     this.playerHealthElements.fill.style.width = `${(health / maxHealth) * 100}%`;
     if (health === 0 && !this.gameOver) {
       this.gameOver = true;
-      this.gameOverMessage.hidden = false;
+      this.deathElapsed = 0;
+      this.deathCameraStartPosition.copy(this.camera.position);
+      this.playerMesh.visible = true;
+      this.deathScreen.hidden = false;
       this.clearKeys();
     }
     this.canvas.dispatchEvent(new CustomEvent<PlayerHealthChange>('playerhealthchange', {
@@ -515,6 +540,31 @@ export class Game {
       detail: { health, maxHealth },
     }));
   };
+
+  private onHostileHitPlayer(damage: number, attackDirection: THREE.Vector3): void {
+    if (this.gameOver) return;
+    this.player.takeDamage(damage);
+
+    this.hitDirection.copy(attackDirection).setY(0);
+    if (this.hitDirection.lengthSq() < 0.001) {
+      this.hitDirection.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    }
+    this.hitDirection.normalize().multiplyScalar(0.75);
+    if (this.velocity.lengthSq() > 0.01) {
+      this.movementDirection.copy(this.velocity).setY(0).normalize();
+      this.hitDirection.addScaledVector(this.movementDirection, 0.25);
+    }
+    if (this.hitDirection.lengthSq() > 0) this.hitDirection.normalize();
+    this.knockbackVelocity.addScaledVector(this.hitDirection, PLAYER_KNOCKBACK_FORCE);
+
+    this.playerRight.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const lateralHit = this.hitDirection.dot(this.playerRight);
+    this.cameraRoll = THREE.MathUtils.clamp(
+      this.cameraRoll - lateralHit * CAMERA_HIT_TILT,
+      -0.35,
+      0.35,
+    );
+  }
 
   private toggleCameraView(): void {
     this.cameraView = this.cameraView === 'first-person' ? 'floating' : 'first-person';
@@ -525,14 +575,19 @@ export class Game {
   }
 
   private onMouseMove = (event: MouseEvent): void => {
-    if (document.pointerLockElement !== this.canvas && !this.mouseFallback) return;
+    if (
+      this.gameOver
+      || (document.pointerLockElement !== this.canvas && !this.mouseFallback)
+    ) return;
     this.yaw -= event.movementX * 0.0022 * this.lookSensitivity;
     this.pitch = THREE.MathUtils.clamp(
       this.pitch - event.movementY * 0.0022 * this.lookSensitivity,
       -1.48,
       1.48,
     );
-    if (this.cameraView === 'first-person') this.camera.rotation.set(this.pitch, this.yaw, 0);
+    if (this.cameraView === 'first-person') {
+      this.camera.rotation.set(this.pitch, this.yaw, this.cameraRoll);
+    }
   };
 
   private onCanvasClick = (): void => {
@@ -588,6 +643,9 @@ export class Game {
     const speed = crouching ? CROUCH_SPEED : sprinting ? SPRINT_SPEED : WALK_SPEED;
     this.velocity.lerp(direction.multiplyScalar(speed), 1 - Math.exp(-14 * delta));
     this.playerPosition.addScaledVector(this.velocity, delta);
+    this.playerPosition.addScaledVector(this.knockbackVelocity, delta);
+    this.knockbackVelocity.multiplyScalar(Math.exp(-5 * delta));
+    this.cameraRoll *= Math.exp(-4 * delta);
     const playerFootprintRadius = Math.hypot(this.player.width, this.player.length) / 2;
     this.playerPosition.x = THREE.MathUtils.clamp(
       this.playerPosition.x,
@@ -621,7 +679,7 @@ export class Game {
 
     if (this.cameraView === 'first-person') {
       this.camera.position.copy(this.playerPosition).add(new THREE.Vector3(0, targetHeight * 0.9, 0));
-      this.camera.rotation.set(this.pitch, this.yaw, 0);
+      this.camera.rotation.set(this.pitch, this.yaw, this.cameraRoll);
       return;
     }
 
@@ -631,13 +689,49 @@ export class Game {
       this.playerPosition.y + targetHeight + 0.35,
       this.playerPosition.z + Math.cos(this.yaw) * cameraDistance,
     );
-    this.camera.rotation.set(this.pitch, this.yaw, 0);
+    this.camera.rotation.set(this.pitch, this.yaw, this.cameraRoll);
+  }
+
+  private updateDeathCinematic(delta: number): void {
+    this.deathElapsed = Math.min(this.deathElapsed + delta, DEATH_CINEMATIC_DURATION);
+    const progress = this.deathElapsed / DEATH_CINEMATIC_DURATION;
+    const easedProgress = progress * progress * (3 - 2 * progress);
+    const angle = this.yaw + easedProgress * 1.4;
+
+    this.playerMesh.position.set(
+      this.playerPosition.x,
+      this.playerPosition.y + this.player.height / 2,
+      this.playerPosition.z,
+    );
+    this.playerMesh.rotation.set(0, this.yaw, easedProgress * Math.PI / 2);
+
+    this.deathCameraPosition.set(
+      this.playerPosition.x + Math.cos(angle) * 4,
+      this.playerPosition.y + 2.4,
+      this.playerPosition.z + Math.sin(angle) * 4,
+    );
+    this.camera.position.copy(this.deathCameraStartPosition)
+      .lerp(this.deathCameraPosition, easedProgress);
+    this.deathCameraLookTarget.set(
+      this.playerPosition.x,
+      this.playerPosition.y + 0.75,
+      this.playerPosition.z,
+    );
+    this.camera.lookAt(this.deathCameraLookTarget);
+
+    if (this.deathElapsed < DEATH_CINEMATIC_DURATION) {
+      const slowMotionDelta = delta * DEATH_SLOW_MOTION_SCALE;
+      this.updatePlayerProjectiles(slowMotionDelta);
+      this.updateHostileMobs(slowMotionDelta);
+    }
   }
 
   private animate = (): void => {
     if (this.disposed) return;
     const delta = Math.min(this.clock.getDelta(), 0.05);
-    if (!this.paused && !this.gameOver) {
+    if (this.gameOver) {
+      this.updateDeathCinematic(delta);
+    } else if (!this.paused) {
       this.updateCamera(delta);
       this.updatePlayerProjectiles(delta);
       this.updateHostileMobs(delta);

@@ -166,9 +166,53 @@ input {
   font-weight: 700;
 }
 
-.game-over-message {
-  color: #ff9086;
-  font-weight: 700;
+.death-screen {
+  position: fixed;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(ellipse at center, rgb(24 9 12 / 30%) 0, rgb(5 5 8 / 70%) 72%),
+    linear-gradient(0deg, rgb(10 4 7 / 58%), rgb(10 4 7 / 24%));
+  color: #f4eee3;
+  inset: 0;
+  pointer-events: none;
+  animation: death-screen-fade-in 1.4s ease-out both;
+}
+
+.death-screen[hidden] {
+  display: none;
+}
+
+.death-card {
+  text-align: center;
+  animation: death-title-fade-in 1.8s ease-out both;
+}
+
+.death-card h1 {
+  margin: 0;
+  color: #f0e6e5;
+  font: 400 clamp(52px, 9vw, 104px)/1 Arial, sans-serif;
+  letter-spacing: 0.2em;
+  padding-left: 0.2em;
+  text-shadow: 0 3px 32px rgb(190 18 35 / 75%);
+}
+
+.death-card p {
+  margin: 24px 0 0;
+  color: rgb(244 238 227 / 78%);
+  font: 14px/1.5 Arial, sans-serif;
+  letter-spacing: 0.08em;
+}
+
+@keyframes death-screen-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes death-title-fade-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .mob-health-list {

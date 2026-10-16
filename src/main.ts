@@ -40,7 +40,7 @@ app.innerHTML = `
           <li>Click the game to start (you are safe until then); move the mouse to look around</li>
           <li><kbd>1</kbd> Fists <span aria-hidden="true">·</span> <kbd>2</kbd> Melee <span aria-hidden="true">·</span> <kbd>3</kbd> Shooter (10 damage each)</li>
           <li>Scroll the mouse wheel to change attacks; left click to attack</li>
-          <li><kbd>Esc</kbd> Return to menu</li>
+          <li><kbd>Esc</kbd> Return to menu (including after death)</li>
         </ul>
         <p class="dialog-note">Hostile mobs are active. Player defence is not implemented yet.</p>
         <button class="dialog-button" type="submit">Back</button>

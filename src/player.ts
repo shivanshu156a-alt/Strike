@@ -17,7 +17,7 @@ export const PLAYER_ATTACKS: readonly PlayerAttackProfile[] = [
   {
     id: 'fists',
     name: 'Fists',
-    attackRange: 1.6,
+    attackRange: 2.4,
     attackDamage: 10,
     attackCooldownSeconds: 0.3,
     mode: 'melee',
@@ -25,7 +25,7 @@ export const PLAYER_ATTACKS: readonly PlayerAttackProfile[] = [
   {
     id: 'melee',
     name: 'Melee',
-    attackRange: 3.2,
+    attackRange: 5,
     attackDamage: 10,
     attackCooldownSeconds: 0.55,
     mode: 'melee',
@@ -33,7 +33,7 @@ export const PLAYER_ATTACKS: readonly PlayerAttackProfile[] = [
   {
     id: 'shooter',
     name: 'Shooter',
-    attackRange: 80,
+    attackRange: 100,
     attackDamage: 10,
     attackCooldownSeconds: 0.25,
     mode: 'projectile',
