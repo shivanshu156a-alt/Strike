@@ -63,6 +63,7 @@ export class Game {
   private readonly playerMesh: THREE.Mesh;
   private readonly playerProjectiles: PlayerProjectile[] = [];
   private readonly hud: HTMLElement;
+  private readonly touchControls: HTMLElement;
   private readonly attackStatus: HTMLElement;
   private readonly spawnProtectionMessage: HTMLElement;
   private readonly deathScreen: HTMLElement;
@@ -78,6 +79,7 @@ export class Game {
   }>();
   private readonly hostileMobs: HostileMob[] = [];
   private readonly keys = new Set<string>();
+  private readonly touchKeys = new Set<string>();
   private readonly velocity = new THREE.Vector3();
   private readonly knockbackVelocity = new THREE.Vector3();
   private readonly playerPosition = new THREE.Vector3(0, 0, 5);
@@ -94,12 +96,18 @@ export class Game {
   private yaw = 0;
   private pitch = 0;
   private cameraRoll = 0;
+  private touchLookPointerId: number | undefined;
+  private lastTouchLookX = 0;
+  private lastTouchLookY = 0;
+  private touchInputDetected = false;
   private mouseFallback = false;
   private animationFrame = 0;
   private disposed = false;
   private gameOver = false;
   private deathElapsed = 0;
   private paused = true;
+  private mouseAttackHeld = false;
+  private mouseFocusHeld = false;
   private nextAttackAt = 0;
 
   constructor(container: HTMLElement, map: ArenaMap, lookSensitivity = 1) {
@@ -113,6 +121,7 @@ export class Game {
     this.spawnProtectionMessage = hudElements.spawnProtectionMessage;
     this.deathScreen = hudElements.deathScreen;
     this.playerHealthElements = hudElements.playerHealth;
+    this.touchControls = this.createTouchControls(container);
 
     this.player.addEventListener('healthchange', this.onPlayerHealthChange);
 
@@ -155,7 +164,12 @@ export class Game {
     this.hostileMobs.forEach((mob) => mob.dispose());
     window.removeEventListener('resize', this.onResize);
     window.removeEventListener('blur', this.clearKeys);
+    window.removeEventListener('pointerup', this.onAnyTouchPointerEnd);
     this.canvas.removeEventListener('click', this.onCanvasClick);
+    this.canvas.removeEventListener('pointerdown', this.onCanvasPointerDown);
+    this.canvas.removeEventListener('pointermove', this.onCanvasPointerMove);
+    this.canvas.removeEventListener('pointerup', this.onCanvasPointerEnd);
+    this.canvas.removeEventListener('pointercancel', this.onCanvasPointerEnd);
     this.canvas.removeEventListener('wheel', this.onWheel);
     this.canvas.removeEventListener('contextmenu', this.onContextMenu);
     this.renderer.dispose();
@@ -173,6 +187,7 @@ export class Game {
     this.canvas.remove();
     this.hud.remove();
     this.deathScreen.remove();
+    this.touchControls.remove();
   }
 
   private createHud(container: HTMLElement): {
@@ -271,6 +286,54 @@ export class Game {
     };
   }
 
+  private createTouchControls(container: HTMLElement): HTMLElement {
+    const controls = document.createElement('section');
+    controls.className = 'touch-controls';
+    controls.setAttribute('aria-label', 'Touch game controls');
+    controls.innerHTML = `
+      <div class="touch-group touch-movement" aria-label="Movement">
+        <button class="touch-button touch-up" type="button" data-hold-key="KeyW" aria-label="Move forward">▲</button>
+        <button class="touch-button touch-left" type="button" data-hold-key="KeyA" aria-label="Move left">◀</button>
+        <button class="touch-button touch-down" type="button" data-hold-key="KeyS" aria-label="Move backward">▼</button>
+        <button class="touch-button touch-right" type="button" data-hold-key="KeyD" aria-label="Move right">▶</button>
+      </div>
+      <div class="touch-group touch-core" aria-label="Movement actions">
+        <button class="touch-button" type="button" data-hold-key="Space">Jump</button>
+        <button class="touch-button" type="button" data-hold-key="ShiftLeft">Sprint</button>
+        <button class="touch-button" type="button" data-hold-key="ControlLeft">Crouch</button>
+        <button class="touch-button" type="button" data-camera-view>Camera</button>
+        <button class="touch-button" type="button" data-hold-action="focus">Focus</button>
+        <button class="touch-button touch-primary" type="button" data-hold-action="attack">Attack</button>
+        <button class="touch-button" type="button" data-game-exit>Menu</button>
+      </div>
+      <div class="touch-toolbar" aria-label="Combat and game actions">
+        <div class="touch-group" aria-label="Select attack">
+          <button class="touch-button" type="button" data-attack-index="0">Fists</button>
+          <button class="touch-button" type="button" data-attack-index="1">Melee</button>
+          <button class="touch-button" type="button" data-attack-index="2">Shooter</button>
+        </div>
+        <div class="touch-group" aria-label="Other actions">
+          <button class="touch-button" type="button" data-action="reload">Reload</button>
+          <button class="touch-button" type="button" data-action="defend">Defend</button>
+          <button class="touch-button" type="button" data-action="equip">Equip</button>
+          <button class="touch-button" type="button" data-action="special">Special</button>
+          <button class="touch-button" type="button" data-weapon-swap="-1">Previous weapon</button>
+          <button class="touch-button" type="button" data-weapon-swap="1">Next weapon</button>
+        </div>
+        <div class="touch-group touch-elements" aria-label="Select element">
+          ${Array.from({ length: 9 }, (_, index) => `<button class="touch-button" type="button" data-element-slot="${index + 1}">Element ${index + 1}</button>`).join('')}
+        </div>
+      </div>
+    `;
+    controls.addEventListener('pointerdown', this.onTouchPointerDown);
+    controls.addEventListener('pointerup', this.onTouchPointerEnd);
+    controls.addEventListener('pointercancel', this.onTouchPointerEnd);
+    controls.addEventListener('lostpointercapture', this.onTouchPointerEnd);
+    controls.addEventListener('click', this.onTouchClick);
+    container.appendChild(controls);
+    return controls;
+  }
+
   private spawnHostileMobs(): void {
     const spawnRadius = Math.max(14, MINIMUM_HOSTILE_SPAWN_DISTANCE);
     HOSTILE_MOBS.forEach((definition, index) => {
@@ -315,8 +378,13 @@ export class Game {
     window.addEventListener('resize', this.onResize);
     window.addEventListener('blur', this.clearKeys);
     this.canvas.addEventListener('click', this.onCanvasClick);
+    this.canvas.addEventListener('pointerdown', this.onCanvasPointerDown);
+    this.canvas.addEventListener('pointermove', this.onCanvasPointerMove);
+    this.canvas.addEventListener('pointerup', this.onCanvasPointerEnd);
+    this.canvas.addEventListener('pointercancel', this.onCanvasPointerEnd);
     this.canvas.addEventListener('wheel', this.onWheel, { passive: false });
     this.canvas.addEventListener('contextmenu', this.onContextMenu);
+    window.addEventListener('pointerup', this.onAnyTouchPointerEnd);
   }
 
   private onKeyDown = (event: KeyboardEvent): void => {
@@ -364,12 +432,20 @@ export class Game {
 
   private onKeyUp = (event: KeyboardEvent): void => {
     this.keys.delete(event.code);
-    if (event.code === 'Space') this.jumpHeld = false;
+    if (event.code === 'Space') this.jumpHeld = this.isKeyDown('Space');
   };
 
   private clearKeys = (): void => {
     this.keys.clear();
+    this.touchKeys.clear();
+    this.touchControls.querySelectorAll<HTMLButtonElement>('button[data-pressed="true"]')
+      .forEach((button) => {
+        delete button.dataset.pressed;
+        button.classList.remove('is-pressed');
+      });
     this.jumpHeld = false;
+    this.mouseAttackHeld = false;
+    this.mouseFocusHeld = false;
     this.verticalVelocity = 0;
     this.emitAction('attack', false);
     this.emitAction('focus', false);
@@ -378,10 +454,14 @@ export class Game {
   private onMouseDown = (event: MouseEvent): void => {
     if (this.gameOver || this.paused || event.target !== this.canvas) return;
     if (event.button === 0) {
+      this.mouseAttackHeld = true;
       this.emitAction('attack', true);
       this.performAttack();
     }
-    if (event.button === 2) this.emitAction('focus', true);
+    if (event.button === 2) {
+      this.mouseFocusHeld = true;
+      this.emitAction('focus', true);
+    }
   };
 
   private performAttack(): void {
@@ -464,17 +544,120 @@ export class Game {
   }
 
   private onMouseUp = (event: MouseEvent): void => {
-    if (event.button === 0) this.emitAction('attack', false);
-    if (event.button === 2) this.emitAction('focus', false);
+    if (event.button === 0 && this.mouseAttackHeld) {
+      this.mouseAttackHeld = false;
+      this.emitAction('attack', false);
+    }
+    if (event.button === 2 && this.mouseFocusHeld) {
+      this.mouseFocusHeld = false;
+      this.emitAction('focus', false);
+    }
   };
 
   private onWheel = (event: WheelEvent): void => {
     event.preventDefault();
     if (event.deltaY === 0) return;
-    const direction = Math.sign(event.deltaY);
-    this.selectAttack((this.player.selectedAttackIndex + direction + PLAYER_ATTACKS.length) % PLAYER_ATTACKS.length);
-    this.emitAction('weapon-swap', direction);
+    this.changeWeapon(Math.sign(event.deltaY));
   };
+
+  private onTouchPointerDown = (event: PointerEvent): void => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
+    if (!button || !this.touchControls.contains(button)) return;
+    event.preventDefault();
+    if (this.gameOver && !button.hasAttribute('data-game-exit')) return;
+    if (this.paused) this.startGame();
+
+    const holdKey = button.dataset.holdKey;
+    if (holdKey) {
+      button.dataset.pressed = 'true';
+      button.classList.add('is-pressed');
+      this.touchKeys.add(holdKey);
+      if (holdKey === 'Space') this.jumpHeld = true;
+      button.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    const holdAction = button.dataset.holdAction as GameAction | undefined;
+    if (!holdAction) return;
+    button.dataset.pressed = 'true';
+    button.classList.add('is-pressed');
+    this.emitAction(holdAction, true);
+    if (holdAction === 'attack') this.performAttack();
+    button.setPointerCapture(event.pointerId);
+  };
+
+  private onTouchPointerEnd = (event: PointerEvent): void => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
+    if (!button || !this.touchControls.contains(button)) return;
+    this.releaseTouchButton(button);
+  };
+
+  private onAnyTouchPointerEnd = (event: PointerEvent): void => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
+    if (button && this.touchControls.contains(button)) this.releaseTouchButton(button);
+  };
+
+  private releaseTouchButton(button: HTMLButtonElement): void {
+    if (button.dataset.pressed !== 'true') return;
+    delete button.dataset.pressed;
+    button.classList.remove('is-pressed');
+
+    const holdKey = button.dataset.holdKey;
+    if (holdKey) {
+      this.touchKeys.delete(holdKey);
+      if (holdKey === 'Space') this.jumpHeld = this.isKeyDown('Space');
+    }
+
+    const holdAction = button.dataset.holdAction as GameAction | undefined;
+    if (holdAction) this.emitAction(holdAction, false);
+  }
+
+  private onTouchClick = (event: MouseEvent): void => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
+    if (!button || !this.touchControls.contains(button)) return;
+    if (this.gameOver && !button.hasAttribute('data-game-exit')) return;
+    if (this.paused) this.startGame();
+
+    const attackIndex = Number(button.dataset.attackIndex);
+    if (button.dataset.attackIndex !== undefined) {
+      this.selectAttack(attackIndex);
+      return;
+    }
+
+    const action = button.dataset.action as GameAction | undefined;
+    if (action) {
+      this.emitAction(action);
+      return;
+    }
+
+    if (button.dataset.elementSlot !== undefined) {
+      this.emitAction('element-select', Number(button.dataset.elementSlot));
+      return;
+    }
+
+    if (button.dataset.weaponSwap !== undefined) {
+      this.changeWeapon(Number(button.dataset.weaponSwap));
+      return;
+    }
+
+    if (button.hasAttribute('data-camera-view')) {
+      this.toggleCameraView();
+      return;
+    }
+
+    if (button.hasAttribute('data-game-exit')) {
+      this.canvas.dispatchEvent(new Event('gameexit', { bubbles: true }));
+    }
+  };
+
+  private changeWeapon(direction: number): void {
+    if (direction === 0) return;
+    this.selectAttack(
+      (this.player.selectedAttackIndex + Math.sign(direction) + PLAYER_ATTACKS.length)
+        % PLAYER_ATTACKS.length,
+    );
+    this.emitAction('weapon-swap', Math.sign(direction));
+  }
 
   private onContextMenu = (event: MouseEvent): void => {
     event.preventDefault();
@@ -513,7 +696,11 @@ export class Game {
   }
 
   private isCrouching(): boolean {
-    return this.keys.has('ControlLeft') || this.keys.has('ControlRight');
+    return this.isKeyDown('ControlLeft') || this.isKeyDown('ControlRight');
+  }
+
+  private isKeyDown(code: string): boolean {
+    return this.keys.has(code) || this.touchKeys.has(code);
   }
 
   private emitAction(action: GameAction, value?: number | boolean): void {
@@ -581,25 +768,59 @@ export class Game {
       this.gameOver
       || (document.pointerLockElement !== this.canvas && !this.mouseFallback)
     ) return;
-    this.yaw -= event.movementX * 0.0022 * this.lookSensitivity;
+    this.updateLook(event.movementX, event.movementY);
+  };
+
+  private onCanvasClick = (): void => {
+    if (this.gameOver) return;
+    if (this.paused) this.startGame();
+    if (!this.touchInputDetected && document.pointerLockElement !== this.canvas) {
+      void this.requestPointerLock();
+    }
+  };
+
+  private onCanvasPointerDown = (event: PointerEvent): void => {
+    if (event.pointerType !== 'touch' || this.gameOver) return;
+    event.preventDefault();
+    this.touchInputDetected = true;
+    if (this.paused) this.startGame();
+    this.touchLookPointerId = event.pointerId;
+    this.lastTouchLookX = event.clientX;
+    this.lastTouchLookY = event.clientY;
+    this.canvas.setPointerCapture(event.pointerId);
+  };
+
+  private onCanvasPointerMove = (event: PointerEvent): void => {
+    if (event.pointerId !== this.touchLookPointerId || this.gameOver) return;
+    this.updateLook(
+      event.clientX - this.lastTouchLookX,
+      event.clientY - this.lastTouchLookY,
+    );
+    this.lastTouchLookX = event.clientX;
+    this.lastTouchLookY = event.clientY;
+  };
+
+  private onCanvasPointerEnd = (event: PointerEvent): void => {
+    if (event.pointerId === this.touchLookPointerId) this.touchLookPointerId = undefined;
+  };
+
+  private updateLook(movementX: number, movementY: number): void {
+    this.yaw -= movementX * 0.0022 * this.lookSensitivity;
     this.pitch = THREE.MathUtils.clamp(
-      this.pitch - event.movementY * 0.0022 * this.lookSensitivity,
+      this.pitch - movementY * 0.0022 * this.lookSensitivity,
       -1.48,
       1.48,
     );
     if (this.cameraView === 'first-person') {
       this.camera.rotation.set(this.pitch, this.yaw, this.cameraRoll);
     }
-  };
+  }
 
-  private onCanvasClick = (): void => {
-    if (this.gameOver) return;
-    if (this.paused) {
-      this.paused = false;
-      this.spawnProtectionMessage.hidden = true;
-    }
-    if (document.pointerLockElement !== this.canvas) void this.requestPointerLock();
-  };
+  private startGame(): void {
+    if (!this.paused || this.gameOver) return;
+    this.paused = false;
+    this.spawnProtectionMessage.hidden = true;
+  }
 
   private async requestPointerLock(): Promise<void> {
     try {
@@ -628,10 +849,10 @@ export class Game {
   };
 
   private updateCamera(delta: number): void {
-    const forwardInput = Number(this.keys.has('KeyW') || this.keys.has('ArrowUp'))
-      - Number(this.keys.has('KeyS') || this.keys.has('ArrowDown'));
-    const strafeInput = Number(this.keys.has('KeyD') || this.keys.has('ArrowRight'))
-      - Number(this.keys.has('KeyA') || this.keys.has('ArrowLeft'));
+    const forwardInput = Number(this.isKeyDown('KeyW') || this.isKeyDown('ArrowUp'))
+      - Number(this.isKeyDown('KeyS') || this.isKeyDown('ArrowDown'));
+    const strafeInput = Number(this.isKeyDown('KeyD') || this.isKeyDown('ArrowRight'))
+      - Number(this.isKeyDown('KeyA') || this.isKeyDown('ArrowLeft'));
 
     const direction = new THREE.Vector3(
       -Math.sin(this.yaw) * forwardInput + Math.cos(this.yaw) * strafeInput,
@@ -641,7 +862,8 @@ export class Game {
     if (direction.lengthSq() > 0) direction.normalize();
 
     const crouching = this.isCrouching();
-    const sprinting = !crouching && (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'));
+    const sprinting = !crouching
+      && (this.isKeyDown('ShiftLeft') || this.isKeyDown('ShiftRight'));
     const speed = crouching ? CROUCH_SPEED : sprinting ? SPRINT_SPEED : WALK_SPEED;
     this.velocity.lerp(direction.multiplyScalar(speed), 1 - Math.exp(-14 * delta));
     this.playerPosition.addScaledVector(this.velocity, delta);

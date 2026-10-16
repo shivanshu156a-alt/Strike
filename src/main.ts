@@ -37,9 +37,10 @@ app.innerHTML = `
           <li><kbd>Shift</kbd> Sprint <span aria-hidden="true">·</span> <kbd>Ctrl</kbd> Crouch</li>
           <li><kbd>Space</kbd> Jump</li>
           <li><kbd>L</kbd> Toggle First Person / Floating Camera</li>
-          <li>Click the game to start (you are safe until then); move the mouse to look around</li>
+          <li>Click the game to start (you are safe until then); drag on touchscreens to look around</li>
           <li><kbd>1</kbd> Fists <span aria-hidden="true">·</span> <kbd>2</kbd> Melee <span aria-hidden="true">·</span> <kbd>3</kbd> Shooter (10 damage each)</li>
           <li>Scroll the mouse wheel to change attacks; left click to attack</li>
+          <li>On mobile, use the on-screen buttons for movement, combat, abilities, elements and menu</li>
           <li><kbd>Esc</kbd> Return to menu (including after death)</li>
         </ul>
         <p class="dialog-note">Hostile mobs are active. Player defence is not implemented yet.</p>
@@ -78,6 +79,14 @@ if (
 let game: Game | undefined;
 let mouseSensitivity = Number(sensitivityInput.value);
 
+const exitGame = (): void => {
+  if (!game) return;
+  game.destroy();
+  game = undefined;
+  gameView.hidden = true;
+  menu.hidden = false;
+};
+
 playButton.addEventListener('click', () => {
   menu.hidden = true;
   gameView.hidden = false;
@@ -93,10 +102,9 @@ sensitivityInput.addEventListener('input', () => {
   sensitivityValue.value = `${mouseSensitivity.toFixed(1)}×`;
 });
 
+gameView.addEventListener('gameexit', exitGame);
+
 document.addEventListener('keydown', (event: KeyboardEvent) => {
   if (event.key !== 'Escape' || !game) return;
-  game.destroy();
-  game = undefined;
-  gameView.hidden = true;
-  menu.hidden = false;
+  exitGame();
 });
