@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { ARENA_GRID_SIZE, GRID_UNIT_SIZE, buildMap, type ArenaMap } from './maps';
 import { HOSTILE_MOBS, HostileMob, type HostileMobHealth } from './hostileMobs';
 import {
@@ -24,15 +25,42 @@ const DEATH_CINEMATIC_DURATION = 5;
 const DEATH_SLOW_MOTION_SCALE = 0.2;
 const PLAYER_KNOCKBACK_FORCE = 5;
 const CAMERA_HIT_TILT = 0.24;
-const THIRD_PERSON_CAMERA_DISTANCE = 0.45;
+const THIRD_PERSON_CAMERA_DISTANCE = 2.5;
 const CAMERA_FOLLOW_SMOOTHING = 24;
 const CAMERA_MODE_TRANSITION_DURATION = 0.2;
 const PLAYER_ANIMATION_FADE_DURATION = 0.2;
 const WORLD_AIM_POINT_DISTANCE = 8;
-const WALKING_PLAYER_URL = new URL('../3D models/Walking.fbx', import.meta.url).href;
-const RUNNING_ANIMATION_URL = new URL('../3D models/Running.fbx', import.meta.url).href;
+const PLAYER_CHARACTER_URL = new URL('../3D/Remy.glb', import.meta.url).href;
 
-type PlayerMovementAnimation = 'stopped' | 'walking' | 'running';
+type PlayerAnimation =
+  | 'idle'
+  | 'walking'
+  | 'running'
+  | 'strafeLeft'
+  | 'strafeRight'
+  | 'walkStrafeLeft'
+  | 'walkStrafeRight'
+  | 'jump'
+  | 'turnLeft'
+  | 'turnRight'
+  | 'turnLeft90'
+  | 'turnRight90';
+type PlayerAnimationState = PlayerAnimation | 'stopped';
+
+const PLAYER_ANIMATION_URLS: Record<PlayerAnimation, string> = {
+  idle: new URL('../3D/idle.fbx', import.meta.url).href,
+  walking: new URL('../3D/Walking.fbx', import.meta.url).href,
+  running: new URL('../3D/Running.fbx', import.meta.url).href,
+  strafeLeft: new URL('../3D/left strafe.fbx', import.meta.url).href,
+  strafeRight: new URL('../3D/right strafe.fbx', import.meta.url).href,
+  walkStrafeLeft: new URL('../3D/left strafe walking.fbx', import.meta.url).href,
+  walkStrafeRight: new URL('../3D/right strafe walking.fbx', import.meta.url).href,
+  jump: new URL('../3D/jump.fbx', import.meta.url).href,
+  turnLeft: new URL('../3D/left turn.fbx', import.meta.url).href,
+  turnRight: new URL('../3D/right turn.fbx', import.meta.url).href,
+  turnLeft90: new URL('../3D/left turn 90.fbx', import.meta.url).href,
+  turnRight90: new URL('../3D/right turn 90.fbx', import.meta.url).href,
+};
 
 interface PlayerProjectile {
   mesh: THREE.Mesh;
@@ -59,13 +87,15 @@ function disposeObjectResources(root: THREE.Object3D): void {
 function retargetClipToCharacter(
   clip: THREE.AnimationClip,
   skinnedMeshes: readonly THREE.SkinnedMesh[],
+  preserveRootRotation: boolean,
 ): THREE.AnimationClip {
   const bonesByName = new Map<string, Set<THREE.Bone>>();
   skinnedMeshes.forEach((mesh) => {
     mesh.skeleton.bones.forEach((bone) => {
-      const matchingBones = bonesByName.get(bone.name) ?? new Set<THREE.Bone>();
+      const normalizedName = bone.name.replace(/^mixamorig_?/, 'mixamorig');
+      const matchingBones = bonesByName.get(normalizedName) ?? new Set<THREE.Bone>();
       matchingBones.add(bone);
-      bonesByName.set(bone.name, matchingBones);
+      bonesByName.set(normalizedName, matchingBones);
     });
   });
 
@@ -73,10 +103,16 @@ function retargetClipToCharacter(
   clip.tracks.forEach((track) => {
     const separator = track.name.lastIndexOf('.');
     const targetName = track.name.slice(0, separator);
-    const matchingBones = bonesByName.get(targetName);
+    const propertyName = track.name.slice(separator + 1);
+    const normalizedName = targetName.replace(/^mixamorig_?/, 'mixamorig');
+    const matchingBones = bonesByName.get(normalizedName);
     if (separator <= 0 || !matchingBones?.size) {
       throw new Error(`Animation track "${track.name}" has no matching player bone.`);
     }
+    if (
+      normalizedName === 'mixamorigHips'
+      && (propertyName === 'position' || (propertyName === 'quaternion' && !preserveRootRotation))
+    ) return;
 
     matchingBones.forEach((bone) => {
       const retargetedTrack = track.clone();
@@ -121,7 +157,6 @@ export class Game {
     toneMapped: false,
   });
   private readonly worldAimMarker: THREE.Mesh;
-  private readonly playerPlaceholder: THREE.Mesh;
   private readonly playerProjectiles: PlayerProjectile[] = [];
   private readonly hud: HTMLElement;
   private readonly crosshair: HTMLDivElement;
@@ -160,16 +195,19 @@ export class Game {
   private readonly cameraOrientation = new THREE.PerspectiveCamera();
   private readonly cameraTransitionStart = new THREE.Quaternion();
   private readonly lookSensitivity: number;
-  private readonly movementActions = new Map<'walking' | 'running', THREE.AnimationAction>();
+  private readonly playerAnimationActions = new Map<PlayerAnimation, THREE.AnimationAction>();
   private playerCharacter: THREE.Group | undefined;
   private playerMixer: THREE.AnimationMixer | undefined;
-  private activeMovementAction: THREE.AnimationAction | undefined;
-  private movementAnimationState: PlayerMovementAnimation = 'stopped';
+  private activePlayerAction: THREE.AnimationAction | undefined;
+  private playerAnimationState: PlayerAnimationState = 'stopped';
+  private locomotionAnimationState: PlayerAnimation = 'idle';
   private cameraView: CameraView = 'first-person';
   private cameraInitialized = false;
   private cameraTransitionElapsed = CAMERA_MODE_TRANSITION_DURATION;
   private jumpHeld = false;
   private verticalVelocity = 0;
+  private turnAnimationRemaining = 0;
+  private airborne = false;
   private yaw = 0;
   private pitch = 0;
   private cameraRoll = 0;
@@ -222,12 +260,7 @@ export class Game {
     this.worldAimMarker.visible = false;
     this.worldAimMarker.renderOrder = 1;
     this.scene.add(this.worldAimMarker);
-    this.playerPlaceholder = new THREE.Mesh(
-      new THREE.BoxGeometry(this.player.width, this.player.height, this.player.length),
-      new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.85 }),
-    );
     this.playerRoot.position.set(this.playerPosition.x, this.player.height / 2, this.playerPosition.z);
-    this.playerRoot.add(this.playerPlaceholder);
     this.scene.add(this.playerRoot);
 
     buildMap(this.scene, map);
@@ -239,33 +272,23 @@ export class Game {
   }
 
   private async loadPlayerCharacter(): Promise<void> {
-    const loader = new FBXLoader();
+    const characterLoader = new GLTFLoader();
+    const animationLoader = new FBXLoader();
     let loadedCharacter: THREE.Group | undefined;
     let normalizedModel: THREE.Group | undefined;
+    let loadedMixer: THREE.AnimationMixer | undefined;
     try {
-      const [characterResult, runningResult] = await Promise.allSettled([
-        loader.loadAsync(WALKING_PLAYER_URL),
-        loader.loadAsync(RUNNING_ANIMATION_URL),
-      ]);
-      if (characterResult.status === 'rejected') throw characterResult.reason;
-      const character = characterResult.value;
+      const animationEntries = Object.entries(PLAYER_ANIMATION_URLS) as [PlayerAnimation, string][];
+      const characterAsset = await characterLoader.loadAsync(PLAYER_CHARACTER_URL);
+      const character = characterAsset.scene;
       loadedCharacter = character;
-      if (runningResult.status === 'rejected') {
-        disposeObjectResources(character);
-        loadedCharacter = undefined;
-        throw runningResult.reason;
-      }
-      const runningRig = runningResult.value;
+      const animationRigs = await Promise.all(
+        animationEntries.map(([, url]) => animationLoader.loadAsync(url)),
+      );
       if (this.disposed) {
         disposeObjectResources(character);
         loadedCharacter = undefined;
         return;
-      }
-
-      const walkingClip = character.animations.find((clip) => clip.tracks.length > 0);
-      const runningClip = runningRig.animations.find((clip) => clip.tracks.length > 0);
-      if (!walkingClip || !runningClip) {
-        throw new Error('The player FBX files do not contain the expected walking and running clips.');
       }
 
       const skinnedMeshes: THREE.SkinnedMesh[] = [];
@@ -273,67 +296,86 @@ export class Game {
         if (object instanceof THREE.SkinnedMesh) skinnedMeshes.push(object);
       });
       if (skinnedMeshes.length === 0) {
-        throw new Error('Walking.fbx does not contain a skinned player character.');
+        throw new Error('Remy.glb does not contain a skinned player character.');
       }
       const characterBones = new Set(skinnedMeshes.flatMap(
-        (mesh) => mesh.skeleton.bones.map((bone) => bone.name),
+        (mesh) => mesh.skeleton.bones.map((bone) => bone.name.replace(/^mixamorig_?/, 'mixamorig')),
       ));
-      const runningBones = new Set<string>();
-      runningRig.traverse((object) => {
-        if (object instanceof THREE.Bone) runningBones.add(object.name);
-      });
-      if (
-        characterBones.size !== runningBones.size
-        || [...runningBones].some((boneName) => !characterBones.has(boneName))
-      ) {
-        throw new Error('The running FBX skeleton does not match the player character skeleton.');
-      }
-
-      for (const [label, clip] of [['walking', walkingClip], ['running', runningClip]] as const) {
-        for (const track of clip.tracks) {
-          const trackTarget = track.name.slice(0, track.name.lastIndexOf('.'));
-          if (!trackTarget || !characterBones.has(trackTarget)) {
-            throw new Error(`The ${label} animation track "${track.name}" has no matching player bone.`);
-          }
-        }
+      if (characterBones.size === 0) {
+        throw new Error('Remy.glb does not contain a usable Mixamo skeleton.');
       }
 
       character.updateMatrixWorld(true);
       const bounds = new THREE.Box3().setFromObject(character);
       const size = bounds.getSize(new THREE.Vector3());
+      const center = bounds.getCenter(new THREE.Vector3());
       if (!Number.isFinite(size.y) || size.y <= 0) {
-        throw new Error('The player character FBX has invalid model bounds.');
+        throw new Error('Remy.glb has invalid model bounds.');
       }
 
       const modelScale = this.player.height / size.y;
       normalizedModel = new THREE.Group();
       normalizedModel.scale.setScalar(modelScale);
       normalizedModel.rotation.y = Math.PI;
-      normalizedModel.position.y = -(bounds.min.y + size.y / 2) * modelScale;
+      normalizedModel.position.set(
+        center.x * modelScale,
+        -center.y * modelScale,
+        center.z * modelScale,
+      );
       normalizedModel.add(character);
 
       const mixer = new THREE.AnimationMixer(character);
-      const retargetedWalkingClip = retargetClipToCharacter(walkingClip, skinnedMeshes);
-      const retargetedRunningClip = retargetClipToCharacter(runningClip, skinnedMeshes);
-      const walkingAction = mixer.clipAction(retargetedWalkingClip);
-      const runningAction = mixer.clipAction(retargetedRunningClip);
-      walkingAction.setLoop(THREE.LoopRepeat, Infinity);
-      runningAction.setLoop(THREE.LoopRepeat, Infinity);
+      loadedMixer = mixer;
+      const animationActions = new Map<PlayerAnimation, THREE.AnimationAction>();
+      animationEntries.forEach(([animation, url], index) => {
+        const [clip] = animationRigs[index].animations.filter((candidate) => candidate.tracks.length > 0);
+        if (!clip) throw new Error(`Animation file "${url}" contains no usable animation clip.`);
+        const preserveRootRotation = ![
+          'strafeLeft',
+          'strafeRight',
+          'walkStrafeLeft',
+          'walkStrafeRight',
+          'turnLeft',
+          'turnRight',
+          'turnLeft90',
+          'turnRight90',
+        ].includes(animation);
+        const retargetedClip = retargetClipToCharacter(clip, skinnedMeshes, preserveRootRotation);
+        const action = mixer.clipAction(retargetedClip);
+        if (animation === 'jump' || animation.startsWith('turn')) {
+          action.setLoop(THREE.LoopOnce, 1);
+          action.clampWhenFinished = true;
+        } else {
+          action.setLoop(THREE.LoopRepeat, Infinity);
+        }
+        animationActions.set(animation, action);
+      });
+
+      if (animationActions.size !== animationEntries.length) {
+        throw new Error('Not all player animation files produced a usable action.');
+      }
 
       this.playerCharacter = character;
       this.playerMixer = mixer;
-      this.movementActions.set('walking', walkingAction);
-      this.movementActions.set('running', runningAction);
+      animationActions.forEach((action, animation) => {
+        this.playerAnimationActions.set(animation, action);
+      });
       this.playerRoot.add(normalizedModel);
-      this.playerRoot.remove(this.playerPlaceholder);
-      this.playerPlaceholder.geometry.dispose();
-      const placeholderMaterial = this.playerPlaceholder.material;
-      if (Array.isArray(placeholderMaterial)) placeholderMaterial.forEach((material) => material.dispose());
-      else placeholderMaterial.dispose();
-      this.setMovementAnimation(this.movementAnimationState);
+      const initialAnimation: PlayerAnimationState = this.gameOver
+        ? 'stopped'
+        : this.playerAnimationState === 'stopped'
+          ? this.locomotionAnimationState
+          : this.playerAnimationState;
+      this.setPlayerAnimation(initialAnimation);
+      console.info(
+        `Loaded Remy.glb with ${characterBones.size} bones and ${this.playerAnimationActions.size} player animations.`,
+      );
       loadedCharacter = undefined;
+      loadedMixer = undefined;
     } catch (error) {
       if (normalizedModel?.parent === this.playerRoot) this.playerRoot.remove(normalizedModel);
+      loadedMixer?.stopAllAction();
+      if (loadedCharacter && loadedMixer) loadedMixer.uncacheRoot(loadedCharacter);
       if (loadedCharacter) disposeObjectResources(loadedCharacter);
       console.error('Unable to load the Mixamo player character and animations.', error);
     }
@@ -946,6 +988,8 @@ export class Game {
       this.deathCameraStartPosition.copy(this.camera.position);
       this.playerRoot.visible = true;
       this.deathScreen.hidden = false;
+      this.turnAnimationRemaining = 0;
+      this.setPlayerAnimation('stopped');
       this.clearKeys();
     }
     this.canvas.dispatchEvent(new CustomEvent<PlayerHealthChange>('playerhealthchange', {
@@ -1031,12 +1075,14 @@ export class Game {
   };
 
   private updateLook(movementX: number, movementY: number): void {
-    this.yaw -= movementX * 0.0022 * this.lookSensitivity;
+    const yawChange = -movementX * 0.0022 * this.lookSensitivity;
+    this.yaw += yawChange;
     this.pitch = THREE.MathUtils.clamp(
       this.pitch - movementY * 0.0022 * this.lookSensitivity,
       -1.48,
       1.48,
     );
+    this.requestTurnAnimation(yawChange);
     if (this.cameraView === 'first-person') {
       this.camera.rotation.set(this.pitch, this.yaw, this.cameraRoll);
     }
@@ -1108,8 +1154,8 @@ export class Game {
       ARENA_HALF_EXTENT - playerFootprintRadius,
     );
 
-    const grounded = this.playerPosition.y <= 0;
-    if (this.jumpHeld && grounded && !crouching) this.verticalVelocity = JUMP_SPEED;
+    const groundedBeforeUpdate = this.playerPosition.y <= 0;
+    if (this.jumpHeld && groundedBeforeUpdate && !crouching) this.verticalVelocity = JUMP_SPEED;
     this.verticalVelocity -= GRAVITY * delta;
     this.playerPosition.y += this.verticalVelocity * delta;
     if (this.playerPosition.y < 0) {
@@ -1117,10 +1163,29 @@ export class Game {
       this.verticalVelocity = 0;
     }
 
-    const movementAnimation: PlayerMovementAnimation = this.velocity.lengthSq() < 0.01
-      ? 'stopped'
-      : sprinting ? 'running' : 'walking';
-    this.setMovementAnimation(movementAnimation);
+    this.locomotionAnimationState = this.getLocomotionAnimation(
+      forwardInput,
+      strafeInput,
+      sprinting,
+    );
+    if (this.playerPosition.y > 0) {
+      this.airborne = true;
+      this.turnAnimationRemaining = 0;
+      this.setPlayerAnimation('jump');
+    } else {
+      if (this.airborne) {
+        this.airborne = false;
+        this.turnAnimationRemaining = 0;
+      }
+      if (this.turnAnimationRemaining > 0) {
+        this.turnAnimationRemaining = Math.max(0, this.turnAnimationRemaining - delta);
+        if (this.turnAnimationRemaining === 0) {
+          this.setPlayerAnimation(this.locomotionAnimationState);
+        }
+      } else {
+        this.setPlayerAnimation(this.locomotionAnimationState);
+      }
+    }
 
     const targetHeight = crouching ? CROUCHING_HEIGHT : this.player.height;
     this.playerRoot.position.set(
@@ -1216,27 +1281,68 @@ export class Game {
     this.cameraFollowPosition.y = Math.max(0.25, this.cameraFollowPosition.y);
   }
 
-  private setMovementAnimation(state: PlayerMovementAnimation): void {
-    const nextAction = state === 'stopped' ? undefined : this.movementActions.get(state);
+  private getLocomotionAnimation(
+    forwardInput: number,
+    strafeInput: number,
+    sprinting: boolean,
+  ): PlayerAnimation {
+    if (this.velocity.lengthSq() < 0.01) return 'idle';
+
+    const hasMovementInput = forwardInput !== 0 || strafeInput !== 0;
+    const relativeForward = hasMovementInput
+      ? forwardInput
+      : -Math.sin(this.yaw) * this.velocity.x - Math.cos(this.yaw) * this.velocity.z;
+    const relativeStrafe = hasMovementInput
+      ? strafeInput
+      : Math.cos(this.yaw) * this.velocity.x - Math.sin(this.yaw) * this.velocity.z;
+    const movingSideways = Math.abs(relativeStrafe) > Math.abs(relativeForward);
+    if (movingSideways) {
+      if (relativeStrafe < 0) return sprinting ? 'strafeLeft' : 'walkStrafeLeft';
+      return sprinting ? 'strafeRight' : 'walkStrafeRight';
+    }
+    return sprinting ? 'running' : 'walking';
+  }
+
+  private requestTurnAnimation(yawChange: number): void {
     if (
-      state === this.movementAnimationState
-      && (state === 'stopped' || !nextAction || nextAction === this.activeMovementAction)
+      Math.abs(yawChange) < 0.15
+      || this.airborne
+      || this.turnAnimationRemaining > 0
+      || this.gameOver
     ) return;
 
-    this.movementAnimationState = state;
+    const turningRight = yawChange < 0;
+    const turnAnimation: PlayerAnimation = Math.abs(yawChange) >= 0.65
+      ? turningRight ? 'turnRight90' : 'turnLeft90'
+      : turningRight ? 'turnRight' : 'turnLeft';
+    const action = this.playerAnimationActions.get(turnAnimation);
+    if (!action) return;
+
+    this.turnAnimationRemaining = action.getClip().duration;
+    this.setPlayerAnimation(turnAnimation);
+  }
+
+  private setPlayerAnimation(state: PlayerAnimationState): void {
+    const nextAction = state === 'stopped' ? undefined : this.playerAnimationActions.get(state);
+    if (
+      state === this.playerAnimationState
+      && (state === 'stopped' || nextAction === this.activePlayerAction)
+    ) return;
+
+    this.playerAnimationState = state;
     if (!nextAction) {
-      this.activeMovementAction?.fadeOut(PLAYER_ANIMATION_FADE_DURATION);
-      this.activeMovementAction = undefined;
+      this.activePlayerAction?.fadeOut(PLAYER_ANIMATION_FADE_DURATION);
+      this.activePlayerAction = undefined;
       return;
     }
 
     nextAction.reset().play();
-    if (this.activeMovementAction && this.activeMovementAction !== nextAction) {
-      this.activeMovementAction.crossFadeTo(nextAction, PLAYER_ANIMATION_FADE_DURATION, true);
+    if (this.activePlayerAction && this.activePlayerAction !== nextAction) {
+      this.activePlayerAction.crossFadeTo(nextAction, PLAYER_ANIMATION_FADE_DURATION);
     } else {
       nextAction.fadeIn(PLAYER_ANIMATION_FADE_DURATION);
     }
-    this.activeMovementAction = nextAction;
+    this.activePlayerAction = nextAction;
   }
 
   private updateDeathCinematic(delta: number): void {
@@ -1277,7 +1383,7 @@ export class Game {
     if (this.disposed) return;
     const delta = Math.min(this.clock.getDelta(), 0.05);
     if (this.gameOver) {
-      this.setMovementAnimation('stopped');
+      this.setPlayerAnimation('stopped');
       this.updateDeathCinematic(delta);
     } else if (!this.paused) {
       this.updateCamera(delta);
