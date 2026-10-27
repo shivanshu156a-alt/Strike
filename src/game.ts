@@ -1,7 +1,7 @@
 import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { ARENA_GRID_SIZE, GRID_UNIT_SIZE, buildMap, type ArenaMap } from './maps';
-import { HOSTILE_MOBS } from './hostileMobs';
-import { HostileMob, type HostileMobHealth } from './hostileMob';
+import { HOSTILE_MOBS, HostileMob, type HostileMobHealth } from './hostileMobs';
 import {
   Player,
   PLAYER_ATTACKS,
@@ -24,6 +24,15 @@ const DEATH_CINEMATIC_DURATION = 5;
 const DEATH_SLOW_MOTION_SCALE = 0.2;
 const PLAYER_KNOCKBACK_FORCE = 5;
 const CAMERA_HIT_TILT = 0.24;
+const THIRD_PERSON_CAMERA_DISTANCE = 0.45;
+const CAMERA_FOLLOW_SMOOTHING = 24;
+const CAMERA_MODE_TRANSITION_DURATION = 0.2;
+const PLAYER_ANIMATION_FADE_DURATION = 0.2;
+const WORLD_AIM_POINT_DISTANCE = 8;
+const WALKING_PLAYER_URL = new URL('../3D models/Walking.fbx', import.meta.url).href;
+const RUNNING_ANIMATION_URL = new URL('../3D models/Running.fbx', import.meta.url).href;
+
+type PlayerMovementAnimation = 'stopped' | 'walking' | 'running';
 
 interface PlayerProjectile {
   mesh: THREE.Mesh;
@@ -31,6 +40,51 @@ interface PlayerProjectile {
   remainingRange: number;
   speed: number;
   damage: number;
+}
+
+function disposeObjectResources(root: THREE.Object3D): void {
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh || object instanceof THREE.Line)) return;
+    object.geometry.dispose();
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    materials.forEach((material) => {
+      Object.values(material).forEach((value) => {
+        if (value instanceof THREE.Texture) value.dispose();
+      });
+      material.dispose();
+    });
+  });
+}
+
+function retargetClipToCharacter(
+  clip: THREE.AnimationClip,
+  skinnedMeshes: readonly THREE.SkinnedMesh[],
+): THREE.AnimationClip {
+  const bonesByName = new Map<string, Set<THREE.Bone>>();
+  skinnedMeshes.forEach((mesh) => {
+    mesh.skeleton.bones.forEach((bone) => {
+      const matchingBones = bonesByName.get(bone.name) ?? new Set<THREE.Bone>();
+      matchingBones.add(bone);
+      bonesByName.set(bone.name, matchingBones);
+    });
+  });
+
+  const tracks: THREE.KeyframeTrack[] = [];
+  clip.tracks.forEach((track) => {
+    const separator = track.name.lastIndexOf('.');
+    const targetName = track.name.slice(0, separator);
+    const matchingBones = bonesByName.get(targetName);
+    if (separator <= 0 || !matchingBones?.size) {
+      throw new Error(`Animation track "${track.name}" has no matching player bone.`);
+    }
+
+    matchingBones.forEach((bone) => {
+      const retargetedTrack = track.clone();
+      retargetedTrack.name = `${bone.uuid}${track.name.slice(separator)}`;
+      tracks.push(retargetedTrack);
+    });
+  });
+  return new THREE.AnimationClip(clip.name, clip.duration, tracks, clip.blendMode);
 }
 
 export type GameAction =
@@ -60,9 +114,17 @@ export class Game {
   private readonly clock = new THREE.Clock();
   private readonly raycaster = new THREE.Raycaster();
   private readonly canvas: HTMLCanvasElement;
-  private readonly playerMesh: THREE.Mesh;
+  private readonly playerRoot = new THREE.Group();
+  private readonly worldAimMarkerMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  private readonly worldAimMarker: THREE.Mesh;
+  private readonly playerPlaceholder: THREE.Mesh;
   private readonly playerProjectiles: PlayerProjectile[] = [];
   private readonly hud: HTMLElement;
+  private readonly crosshair: HTMLDivElement;
   private readonly touchControls: HTMLElement;
   private readonly attackStatus: HTMLElement;
   private readonly spawnProtectionMessage: HTMLElement;
@@ -89,8 +151,23 @@ export class Game {
   private readonly deathCameraStartPosition = new THREE.Vector3();
   private readonly deathCameraPosition = new THREE.Vector3();
   private readonly deathCameraLookTarget = new THREE.Vector3();
+  private readonly cameraFollowPosition = new THREE.Vector3();
+  private readonly cameraLookTarget = new THREE.Vector3();
+  private readonly cameraOffset = new THREE.Vector3();
+  private readonly aimOrigin = new THREE.Vector3();
+  private readonly aimDirection = new THREE.Vector3();
+  private readonly aimPoint = new THREE.Vector3();
+  private readonly cameraOrientation = new THREE.PerspectiveCamera();
+  private readonly cameraTransitionStart = new THREE.Quaternion();
   private readonly lookSensitivity: number;
+  private readonly movementActions = new Map<'walking' | 'running', THREE.AnimationAction>();
+  private playerCharacter: THREE.Group | undefined;
+  private playerMixer: THREE.AnimationMixer | undefined;
+  private activeMovementAction: THREE.AnimationAction | undefined;
+  private movementAnimationState: PlayerMovementAnimation = 'stopped';
   private cameraView: CameraView = 'first-person';
+  private cameraInitialized = false;
+  private cameraTransitionElapsed = CAMERA_MODE_TRANSITION_DURATION;
   private jumpHeld = false;
   private verticalVelocity = 0;
   private yaw = 0;
@@ -117,6 +194,7 @@ export class Game {
     container.appendChild(this.canvas);
     const hudElements = this.createHud(container);
     this.hud = hudElements.hud;
+    this.crosshair = hudElements.crosshair;
     this.attackStatus = hudElements.attackStatus;
     this.spawnProtectionMessage = hudElements.spawnProtectionMessage;
     this.deathScreen = hudElements.deathScreen;
@@ -136,18 +214,129 @@ export class Game {
 
     this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 160);
     this.camera.rotation.order = 'YXZ';
-    this.playerMesh = new THREE.Mesh(
+    this.cameraOrientation.rotation.order = 'YXZ';
+    this.worldAimMarker = new THREE.Mesh(
+      new THREE.SphereGeometry(0.035, 8, 8),
+      this.worldAimMarkerMaterial,
+    );
+    this.worldAimMarker.visible = false;
+    this.worldAimMarker.renderOrder = 1;
+    this.scene.add(this.worldAimMarker);
+    this.playerPlaceholder = new THREE.Mesh(
       new THREE.BoxGeometry(this.player.width, this.player.height, this.player.length),
       new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.85 }),
     );
-    this.playerMesh.position.set(this.playerPosition.x, this.player.height / 2, this.playerPosition.z);
-    this.scene.add(this.playerMesh);
+    this.playerRoot.position.set(this.playerPosition.x, this.player.height / 2, this.playerPosition.z);
+    this.playerRoot.add(this.playerPlaceholder);
+    this.scene.add(this.playerRoot);
 
     buildMap(this.scene, map);
     this.spawnHostileMobs();
     this.attachEvents();
     this.updateCamera(0);
+    void this.loadPlayerCharacter();
     this.animate();
+  }
+
+  private async loadPlayerCharacter(): Promise<void> {
+    const loader = new FBXLoader();
+    let loadedCharacter: THREE.Group | undefined;
+    let normalizedModel: THREE.Group | undefined;
+    try {
+      const [characterResult, runningResult] = await Promise.allSettled([
+        loader.loadAsync(WALKING_PLAYER_URL),
+        loader.loadAsync(RUNNING_ANIMATION_URL),
+      ]);
+      if (characterResult.status === 'rejected') throw characterResult.reason;
+      const character = characterResult.value;
+      loadedCharacter = character;
+      if (runningResult.status === 'rejected') {
+        disposeObjectResources(character);
+        loadedCharacter = undefined;
+        throw runningResult.reason;
+      }
+      const runningRig = runningResult.value;
+      if (this.disposed) {
+        disposeObjectResources(character);
+        loadedCharacter = undefined;
+        return;
+      }
+
+      const walkingClip = character.animations.find((clip) => clip.tracks.length > 0);
+      const runningClip = runningRig.animations.find((clip) => clip.tracks.length > 0);
+      if (!walkingClip || !runningClip) {
+        throw new Error('The player FBX files do not contain the expected walking and running clips.');
+      }
+
+      const skinnedMeshes: THREE.SkinnedMesh[] = [];
+      character.traverse((object) => {
+        if (object instanceof THREE.SkinnedMesh) skinnedMeshes.push(object);
+      });
+      if (skinnedMeshes.length === 0) {
+        throw new Error('Walking.fbx does not contain a skinned player character.');
+      }
+      const characterBones = new Set(skinnedMeshes.flatMap(
+        (mesh) => mesh.skeleton.bones.map((bone) => bone.name),
+      ));
+      const runningBones = new Set<string>();
+      runningRig.traverse((object) => {
+        if (object instanceof THREE.Bone) runningBones.add(object.name);
+      });
+      if (
+        characterBones.size !== runningBones.size
+        || [...runningBones].some((boneName) => !characterBones.has(boneName))
+      ) {
+        throw new Error('The running FBX skeleton does not match the player character skeleton.');
+      }
+
+      for (const [label, clip] of [['walking', walkingClip], ['running', runningClip]] as const) {
+        for (const track of clip.tracks) {
+          const trackTarget = track.name.slice(0, track.name.lastIndexOf('.'));
+          if (!trackTarget || !characterBones.has(trackTarget)) {
+            throw new Error(`The ${label} animation track "${track.name}" has no matching player bone.`);
+          }
+        }
+      }
+
+      character.updateMatrixWorld(true);
+      const bounds = new THREE.Box3().setFromObject(character);
+      const size = bounds.getSize(new THREE.Vector3());
+      if (!Number.isFinite(size.y) || size.y <= 0) {
+        throw new Error('The player character FBX has invalid model bounds.');
+      }
+
+      const modelScale = this.player.height / size.y;
+      normalizedModel = new THREE.Group();
+      normalizedModel.scale.setScalar(modelScale);
+      normalizedModel.rotation.y = Math.PI;
+      normalizedModel.position.y = -(bounds.min.y + size.y / 2) * modelScale;
+      normalizedModel.add(character);
+
+      const mixer = new THREE.AnimationMixer(character);
+      const retargetedWalkingClip = retargetClipToCharacter(walkingClip, skinnedMeshes);
+      const retargetedRunningClip = retargetClipToCharacter(runningClip, skinnedMeshes);
+      const walkingAction = mixer.clipAction(retargetedWalkingClip);
+      const runningAction = mixer.clipAction(retargetedRunningClip);
+      walkingAction.setLoop(THREE.LoopRepeat, Infinity);
+      runningAction.setLoop(THREE.LoopRepeat, Infinity);
+
+      this.playerCharacter = character;
+      this.playerMixer = mixer;
+      this.movementActions.set('walking', walkingAction);
+      this.movementActions.set('running', runningAction);
+      this.playerRoot.add(normalizedModel);
+      this.playerRoot.remove(this.playerPlaceholder);
+      this.playerPlaceholder.geometry.dispose();
+      const placeholderMaterial = this.playerPlaceholder.material;
+      if (Array.isArray(placeholderMaterial)) placeholderMaterial.forEach((material) => material.dispose());
+      else placeholderMaterial.dispose();
+      this.setMovementAnimation(this.movementAnimationState);
+      loadedCharacter = undefined;
+    } catch (error) {
+      if (normalizedModel?.parent === this.playerRoot) this.playerRoot.remove(normalizedModel);
+      if (loadedCharacter) disposeObjectResources(loadedCharacter);
+      console.error('Unable to load the Mixamo player character and animations.', error);
+    }
   }
 
   destroy(): void {
@@ -161,6 +350,8 @@ export class Game {
     document.removeEventListener('mouseup', this.onMouseUp);
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     this.player.removeEventListener('healthchange', this.onPlayerHealthChange);
+    this.playerMixer?.stopAllAction();
+    if (this.playerCharacter) this.playerMixer?.uncacheRoot(this.playerCharacter);
     this.hostileMobs.forEach((mob) => mob.dispose());
     window.removeEventListener('resize', this.onResize);
     window.removeEventListener('blur', this.clearKeys);
@@ -177,21 +368,18 @@ export class Game {
     for (let index = this.playerProjectiles.length - 1; index >= 0; index -= 1) {
       this.removePlayerProjectile(index);
     }
-    this.scene.traverse((object) => {
-      if (!(object instanceof THREE.Mesh || object instanceof THREE.Line)) return;
-      object.geometry.dispose();
-      const materials = Array.isArray(object.material) ? object.material : [object.material];
-      materials.forEach((material) => material.dispose());
-    });
+    disposeObjectResources(this.scene);
     this.scene.clear();
     this.canvas.remove();
     this.hud.remove();
+    this.crosshair.remove();
     this.deathScreen.remove();
     this.touchControls.remove();
   }
 
   private createHud(container: HTMLElement): {
     hud: HTMLElement;
+    crosshair: HTMLDivElement;
     deathScreen: HTMLElement;
     spawnProtectionMessage: HTMLElement;
     attackStatus: HTMLElement;
@@ -204,7 +392,6 @@ export class Game {
     const crosshair = document.createElement('div');
     crosshair.className = 'game-crosshair';
     crosshair.setAttribute('aria-hidden', 'true');
-    hud.appendChild(crosshair);
 
     const attackStatus = document.createElement('div');
     attackStatus.className = 'combat-note attack-status';
@@ -273,8 +460,10 @@ export class Game {
 
     hud.appendChild(mobList);
     container.appendChild(hud);
+    container.appendChild(crosshair);
     return {
       hud,
+      crosshair,
       deathScreen,
       spawnProtectionMessage,
       attackStatus,
@@ -470,11 +659,12 @@ export class Game {
     if (now < this.nextAttackAt) return;
     this.nextAttackAt = now + attack.attackCooldownSeconds * 1000;
 
-    this.camera.updateMatrixWorld(true);
-    const direction = this.camera.getWorldDirection(new THREE.Vector3()).normalize();
+    this.updateAimRay();
+    this.raycaster.set(this.aimOrigin, this.aimDirection);
+    this.raycaster.near = 0;
+    this.raycaster.far = attack.attackRange;
+    const direction = this.aimDirection.clone();
     if (attack.mode === 'melee') {
-      this.raycaster.set(this.camera.position, direction);
-      this.raycaster.far = attack.attackRange;
       const targets = this.hostileMobs
         .filter((mob) => !mob.isDefeated)
         .map((mob) => {
@@ -494,7 +684,7 @@ export class Game {
       toneMapped: false,
     });
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 10), material);
-    mesh.position.copy(this.camera.position).addScaledVector(direction, 0.45);
+    mesh.position.copy(this.aimOrigin).addScaledVector(direction, 0.45);
     this.scene.add(mesh);
     this.playerProjectiles.push({
       mesh,
@@ -532,6 +722,40 @@ export class Game {
       projectile.remainingRange -= step;
       if (projectile.remainingRange <= 0) this.removePlayerProjectile(index);
     }
+  }
+
+  private updateCrosshairTarget(): void {
+    if (this.gameOver) {
+      this.crosshair.classList.remove('is-targeted');
+      this.worldAimMarker.visible = false;
+      return;
+    }
+
+    this.updateAimRay();
+    this.raycaster.far = this.player.selectedAttack.attackRange;
+    const targets = this.hostileMobs
+      .filter((mob) => !mob.isDefeated)
+      .map((mob) => {
+        mob.mesh.updateMatrixWorld(true);
+        return mob.mesh;
+      });
+    const hasTarget = this.raycaster.intersectObjects(targets, false).length > 0;
+    this.crosshair.classList.toggle('is-targeted', hasTarget);
+    this.crosshair.classList.toggle('is-floating-view', this.cameraView === 'floating');
+    this.worldAimMarker.visible = this.cameraView === 'floating';
+    if (this.worldAimMarker.visible) {
+      this.worldAimMarker.position.copy(this.aimPoint);
+      this.worldAimMarkerMaterial.color.set(hasTarget ? 0xa6ffca : 0xffffff);
+    }
+  }
+
+  private updateAimRay(): void {
+    this.camera.updateMatrixWorld(true);
+    this.camera.getWorldDirection(this.aimDirection).normalize();
+    this.aimOrigin.copy(this.camera.position);
+    this.aimPoint.copy(this.aimOrigin).addScaledVector(this.aimDirection, WORLD_AIM_POINT_DISTANCE);
+    this.raycaster.set(this.aimOrigin, this.aimDirection);
+    this.raycaster.near = 0;
   }
 
   private removePlayerProjectile(index: number): void {
@@ -720,7 +944,7 @@ export class Game {
       this.gameOver = true;
       this.deathElapsed = 0;
       this.deathCameraStartPosition.copy(this.camera.position);
-      this.playerMesh.visible = true;
+      this.playerRoot.visible = true;
       this.deathScreen.hidden = false;
       this.clearKeys();
     }
@@ -756,6 +980,8 @@ export class Game {
   }
 
   private toggleCameraView(): void {
+    this.cameraTransitionStart.copy(this.camera.quaternion);
+    this.cameraTransitionElapsed = 0;
     this.cameraView = this.cameraView === 'first-person' ? 'floating' : 'first-person';
     this.canvas.dispatchEvent(new CustomEvent<{ view: CameraView }>('cameraviewchange', {
       bubbles: true,
@@ -891,29 +1117,126 @@ export class Game {
       this.verticalVelocity = 0;
     }
 
+    const movementAnimation: PlayerMovementAnimation = this.velocity.lengthSq() < 0.01
+      ? 'stopped'
+      : sprinting ? 'running' : 'walking';
+    this.setMovementAnimation(movementAnimation);
+
     const targetHeight = crouching ? CROUCHING_HEIGHT : this.player.height;
-    this.playerMesh.position.set(
+    this.playerRoot.position.set(
       this.playerPosition.x,
       this.playerPosition.y + targetHeight / 2,
       this.playerPosition.z,
     );
-    this.playerMesh.scale.y = targetHeight / this.player.height;
-    this.playerMesh.rotation.y = this.yaw;
-    this.playerMesh.visible = this.cameraView === 'floating';
+    this.playerRoot.scale.y = targetHeight / this.player.height;
+    this.playerRoot.rotation.y = this.yaw;
+    this.playerRoot.visible = this.cameraView === 'floating';
 
     if (this.cameraView === 'first-person') {
-      this.camera.position.copy(this.playerPosition).add(new THREE.Vector3(0, targetHeight * 0.9, 0));
-      this.camera.rotation.set(this.pitch, this.yaw, this.cameraRoll);
+      this.cameraFollowPosition.set(
+        this.playerPosition.x,
+        this.playerPosition.y + targetHeight * 0.92,
+        this.playerPosition.z,
+      );
+      this.applyCameraFollow(delta);
+      this.cameraOrientation.rotation.set(this.pitch, this.yaw, this.cameraRoll);
+      this.applyCameraOrientation(delta);
       return;
     }
 
-    const cameraDistance = 5;
-    this.camera.position.set(
-      this.playerPosition.x - Math.sin(this.yaw) * cameraDistance,
-      this.playerPosition.y + targetHeight + 0.35,
-      this.playerPosition.z + Math.cos(this.yaw) * cameraDistance,
+    this.cameraLookTarget.set(
+      this.playerPosition.x,
+      this.playerPosition.y + targetHeight * 0.82,
+      this.playerPosition.z,
     );
-    this.camera.rotation.set(this.pitch, this.yaw, this.cameraRoll);
+    const orbitPitch = THREE.MathUtils.clamp(this.pitch, -0.55, 0.55);
+    this.cameraOffset.set(
+      Math.sin(this.yaw) * Math.cos(orbitPitch),
+      0,
+      Math.cos(this.yaw) * Math.cos(orbitPitch),
+    ).multiplyScalar(THIRD_PERSON_CAMERA_DISTANCE);
+    this.cameraOffset.y = 0.5 - Math.sin(orbitPitch) * THIRD_PERSON_CAMERA_DISTANCE;
+    this.cameraFollowPosition.copy(this.cameraLookTarget).add(this.cameraOffset);
+    this.constrainThirdPersonCamera();
+    this.applyCameraFollow(delta);
+    this.cameraOrientation.rotation.set(this.pitch, this.yaw, this.cameraRoll);
+    this.applyCameraOrientation(delta);
+  }
+
+  private applyCameraOrientation(delta: number): void {
+    this.cameraOrientation.updateMatrixWorld(true);
+    if (this.cameraTransitionElapsed >= CAMERA_MODE_TRANSITION_DURATION || delta <= 0) {
+      this.camera.quaternion.copy(this.cameraOrientation.quaternion);
+      return;
+    }
+
+    this.cameraTransitionElapsed = Math.min(
+      CAMERA_MODE_TRANSITION_DURATION,
+      this.cameraTransitionElapsed + delta,
+    );
+    const progress = this.cameraTransitionElapsed / CAMERA_MODE_TRANSITION_DURATION;
+    const easedProgress = progress * progress * (3 - 2 * progress);
+    this.camera.quaternion.copy(this.cameraTransitionStart)
+      .slerp(this.cameraOrientation.quaternion, easedProgress);
+  }
+
+  private applyCameraFollow(delta: number): void {
+    if (!this.cameraInitialized || delta <= 0) {
+      this.camera.position.copy(this.cameraFollowPosition);
+      this.cameraInitialized = true;
+      return;
+    }
+
+    const interpolation = 1 - Math.exp(-CAMERA_FOLLOW_SMOOTHING * delta);
+    this.camera.position.lerp(this.cameraFollowPosition, interpolation);
+  }
+
+  private constrainThirdPersonCamera(): void {
+    this.cameraOffset.subVectors(this.cameraFollowPosition, this.cameraLookTarget);
+    const distance = this.cameraOffset.length();
+    if (distance <= 0) return;
+
+    this.raycaster.set(this.cameraLookTarget, this.cameraOffset.multiplyScalar(1 / distance));
+    this.raycaster.near = 0.15;
+    this.raycaster.far = distance;
+    const obstruction = this.raycaster.intersectObjects(this.scene.children, true).find((hit) => {
+      let object: THREE.Object3D | null = hit.object;
+      while (object) {
+        if (object === this.playerRoot) return false;
+        object = object.parent;
+      }
+      return hit.object instanceof THREE.Mesh;
+    });
+
+    if (obstruction) {
+      const safeDistance = Math.max(0.75, obstruction.distance - 0.2);
+      this.cameraFollowPosition.copy(this.cameraLookTarget)
+        .addScaledVector(this.cameraOffset, safeDistance / distance);
+    }
+    this.cameraFollowPosition.y = Math.max(0.25, this.cameraFollowPosition.y);
+  }
+
+  private setMovementAnimation(state: PlayerMovementAnimation): void {
+    const nextAction = state === 'stopped' ? undefined : this.movementActions.get(state);
+    if (
+      state === this.movementAnimationState
+      && (state === 'stopped' || !nextAction || nextAction === this.activeMovementAction)
+    ) return;
+
+    this.movementAnimationState = state;
+    if (!nextAction) {
+      this.activeMovementAction?.fadeOut(PLAYER_ANIMATION_FADE_DURATION);
+      this.activeMovementAction = undefined;
+      return;
+    }
+
+    nextAction.reset().play();
+    if (this.activeMovementAction && this.activeMovementAction !== nextAction) {
+      this.activeMovementAction.crossFadeTo(nextAction, PLAYER_ANIMATION_FADE_DURATION, true);
+    } else {
+      nextAction.fadeIn(PLAYER_ANIMATION_FADE_DURATION);
+    }
+    this.activeMovementAction = nextAction;
   }
 
   private updateDeathCinematic(delta: number): void {
@@ -922,12 +1245,12 @@ export class Game {
     const easedProgress = progress * progress * (3 - 2 * progress);
     const angle = this.yaw + easedProgress * 1.4;
 
-    this.playerMesh.position.set(
+    this.playerRoot.position.set(
       this.playerPosition.x,
       this.playerPosition.y + this.player.height / 2,
       this.playerPosition.z,
     );
-    this.playerMesh.rotation.set(0, this.yaw, easedProgress * Math.PI / 2);
+    this.playerRoot.rotation.set(0, this.yaw, easedProgress * Math.PI / 2);
 
     this.deathCameraPosition.set(
       this.playerPosition.x + Math.cos(angle) * 4,
@@ -954,12 +1277,15 @@ export class Game {
     if (this.disposed) return;
     const delta = Math.min(this.clock.getDelta(), 0.05);
     if (this.gameOver) {
+      this.setMovementAnimation('stopped');
       this.updateDeathCinematic(delta);
     } else if (!this.paused) {
       this.updateCamera(delta);
       this.updatePlayerProjectiles(delta);
       this.updateHostileMobs(delta);
     }
+    this.updateCrosshairTarget();
+    this.playerMixer?.update(delta);
     this.renderer.render(this.scene, this.camera);
     this.animationFrame = requestAnimationFrame(this.animate);
   };
