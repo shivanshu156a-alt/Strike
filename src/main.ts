@@ -15,6 +15,10 @@ app.innerHTML = `
         <button class="menu-hit-area menu-how-to-play" type="button" aria-label="How to Play"></button>
         <button class="menu-hit-area menu-quit" type="button" aria-label="Quit"></button>
       </div>
+      <label class="mob-test-toggle" for="disable-mobs">
+        <input id="disable-mobs" type="checkbox">
+        <span>Disable mobs (test)</span>
+      </label>
     </section>
     <section id="game-view" aria-label="Free camera view" hidden></section>
     <dialog class="menu-dialog" id="settings-dialog" aria-labelledby="settings-title">
@@ -68,10 +72,12 @@ const howToPlayDialog = app.querySelector<HTMLDialogElement>('#how-to-play-dialo
 const quitDialog = app.querySelector<HTMLDialogElement>('#quit-dialog');
 const sensitivityInput = app.querySelector<HTMLInputElement>('#sensitivity');
 const sensitivityValue = app.querySelector<HTMLOutputElement>('#sensitivity-value');
+const disableMobsInput = app.querySelector<HTMLInputElement>('#disable-mobs');
 
 if (
   !menu || !gameView || !playButton || !settingsButton || !howToPlayButton || !quitButton
   || !settingsDialog || !howToPlayDialog || !quitDialog || !sensitivityInput || !sensitivityValue
+  || !disableMobsInput
 ) {
   throw new Error('The main menu could not be initialized.');
 }
@@ -90,7 +96,7 @@ const exitGame = (): void => {
 playButton.addEventListener('click', () => {
   menu.hidden = true;
   gameView.hidden = false;
-  game = new Game(gameView, EMPTY_ARENA, mouseSensitivity);
+  game = new Game(gameView, EMPTY_ARENA, mouseSensitivity, !disableMobsInput.checked);
 });
 
 settingsButton.addEventListener('click', () => settingsDialog.showModal());
