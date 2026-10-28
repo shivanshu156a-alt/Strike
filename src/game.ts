@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { ARENA_GRID_SIZE, GRID_UNIT_SIZE, buildMap, type ArenaMap } from './maps';
 import { HOSTILE_MOBS, HostileMob, type HostileMobHealth } from './hostileMobs';
 import {
@@ -315,6 +316,7 @@ export class Game {
 
   private async loadPlayerCharacter(): Promise<void> {
     const characterLoader = new GLTFLoader();
+    characterLoader.setMeshoptDecoder(MeshoptDecoder);
     const animationLoader = new FBXLoader();
     let loadedCharacter: THREE.Group | undefined;
     let normalizedModel: THREE.Group | undefined;
