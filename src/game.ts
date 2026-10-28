@@ -235,7 +235,7 @@ export class Game {
   private activePlayerAction: THREE.AnimationAction | undefined;
   private playerAnimationState: PlayerAnimationState = 'stopped';
   private locomotionAnimationState: PlayerAnimation = 'idle';
-  private cameraView: CameraView = 'first-person';
+  private cameraView: CameraView = 'floating';
   private cameraInitialized = false;
   private cameraTransitionElapsed = CAMERA_MODE_TRANSITION_DURATION;
   private jumpHeld = false;
@@ -321,14 +321,12 @@ export class Game {
     let loadedCharacter: THREE.Group | undefined;
     let normalizedModel: THREE.Group | undefined;
     let loadedMixer: THREE.AnimationMixer | undefined;
+    let characterMounted = false;
     try {
       const animationEntries = Object.entries(PLAYER_ANIMATION_URLS) as [PlayerAnimation, string][];
       const characterAsset = await characterLoader.loadAsync(PLAYER_CHARACTER_URL);
       const character = characterAsset.scene;
       loadedCharacter = character;
-      const animationRigs = await Promise.all(
-        animationEntries.map(([, url]) => animationLoader.loadAsync(url)),
-      );
       if (this.disposed) {
         disposeObjectResources(character);
         loadedCharacter = undefined;
@@ -370,6 +368,18 @@ export class Game {
 
       const mixer = new THREE.AnimationMixer(character);
       loadedMixer = mixer;
+      this.playerCharacter = character;
+      this.playerMixer = mixer;
+      this.playerRoot.add(normalizedModel);
+      characterMounted = true;
+      loadedCharacter = undefined;
+      loadedMixer = undefined;
+
+      const animationRigs = await Promise.all(
+        animationEntries.map(([, url]) => animationLoader.loadAsync(url)),
+      );
+      if (this.disposed) return;
+
       const animationActions = new Map<PlayerAnimation, THREE.AnimationAction>();
       animationEntries.forEach(([animation, url], index) => {
         const [clip] = animationRigs[index].animations.filter((candidate) => candidate.tracks.length > 0);
@@ -416,12 +426,9 @@ export class Game {
         throw new Error('Not all player animation files produced a usable action.');
       }
 
-      this.playerCharacter = character;
-      this.playerMixer = mixer;
       animationActions.forEach((action, animation) => {
         this.playerAnimationActions.set(animation, action);
       });
-      this.playerRoot.add(normalizedModel);
       const initialAnimation: PlayerAnimationState = this.gameOver
         ? 'death'
         : this.playerAnimationState === 'stopped'
@@ -431,14 +438,19 @@ export class Game {
       console.info(
         `Loaded character.glb with ${characterBones.size} bones and ${this.playerAnimationActions.size} player animations.`,
       );
-      loadedCharacter = undefined;
-      loadedMixer = undefined;
     } catch (error) {
-      if (normalizedModel?.parent === this.playerRoot) this.playerRoot.remove(normalizedModel);
-      loadedMixer?.stopAllAction();
-      if (loadedCharacter && loadedMixer) loadedMixer.uncacheRoot(loadedCharacter);
-      if (loadedCharacter) disposeObjectResources(loadedCharacter);
-      console.error('Unable to load the Mixamo player character and animations.', error);
+      if (!characterMounted) {
+        if (normalizedModel?.parent === this.playerRoot) this.playerRoot.remove(normalizedModel);
+        loadedMixer?.stopAllAction();
+        if (loadedCharacter && loadedMixer) loadedMixer.uncacheRoot(loadedCharacter);
+        if (loadedCharacter) disposeObjectResources(loadedCharacter);
+      }
+      console.error(
+        characterMounted
+          ? 'Player character loaded, but its animations could not be loaded.'
+          : 'Unable to load the Mixamo player character.',
+        error,
+      );
     }
   }
 

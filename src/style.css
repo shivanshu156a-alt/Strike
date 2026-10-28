@@ -45,7 +45,7 @@ input {
   position: absolute;
   inset: 0;
   background-color: #172538;
-  background-image: url('/Main%20Menu.png');
+  background-image: url('../Main Menu.png');
   background-position: center;
   background-repeat: no-repeat;
   background-size: cover;

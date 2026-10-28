@@ -20,7 +20,7 @@ app.innerHTML = `
         <span>Disable mobs (test)</span>
       </label>
     </section>
-    <section id="game-view" aria-label="Free camera view" hidden></section>
+    <section id="game-view" aria-label="Game view" hidden></section>
     <dialog class="menu-dialog" id="settings-dialog" aria-labelledby="settings-title">
       <form method="dialog">
         <h1 id="settings-title">Settings</h1>
@@ -40,7 +40,7 @@ app.innerHTML = `
           <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</li>
           <li><kbd>Shift</kbd> Sprint <span aria-hidden="true">·</span> <kbd>Ctrl</kbd> Crouch</li>
           <li><kbd>Space</kbd> Jump</li>
-          <li><kbd>L</kbd> Toggle First Person / Floating Camera</li>
+          <li>Starts in floating camera; press <kbd>L</kbd> to toggle First Person / Floating Camera</li>
           <li>Click the game to start (you are safe until then); drag on touchscreens to look around</li>
           <li><kbd>1</kbd> Fists <span aria-hidden="true">·</span> <kbd>2</kbd> Melee <span aria-hidden="true">·</span> <kbd>3</kbd> Shooter (10 damage each)</li>
           <li>Scroll the mouse wheel to change attacks; left click to attack</li>
