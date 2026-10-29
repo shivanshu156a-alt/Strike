@@ -672,6 +672,20 @@ export class Game {
 
   private updateHostileMobs(delta: number): void {
     for (const mob of this.hostileMobs) mob.update(delta, this.playerPosition, this.yaw);
+    for (let pass = 0; pass < 3; pass += 1) {
+      for (let index = 0; index < this.hostileMobs.length; index += 1) {
+        const mob = this.hostileMobs[index];
+        mob.resolveCollisionWithPlayer(
+          this.playerPosition,
+          this.player.width,
+          this.player.length,
+          this.player.height,
+        );
+        for (let otherIndex = index + 1; otherIndex < this.hostileMobs.length; otherIndex += 1) {
+          mob.resolveCollisionWith(this.hostileMobs[otherIndex]);
+        }
+      }
+    }
   }
 
   private attachEvents(): void {
@@ -1282,7 +1296,7 @@ export class Game {
     const targetHeight = crouching ? CROUCHING_HEIGHT : this.player.height;
     this.playerRoot.position.set(
       this.playerPosition.x,
-      this.playerPosition.y + targetHeight / 2,
+      this.playerPosition.y + this.player.height / 2,
       this.playerPosition.z,
     );
     this.playerRoot.rotation.y = this.yaw;

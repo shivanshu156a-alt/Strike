@@ -312,8 +312,98 @@ export class HostileMob {
     this.applyKnockback(delta);
   }
 
+  resolveCollisionWithPlayer(
+    playerPosition: THREE.Vector3,
+    playerWidth: number,
+    playerLength: number,
+    playerHeight: number,
+  ): void {
+    if (this.disposed) return;
+    const mobBottom = this.position.y - this.definition.dimensions.height / 2;
+    const mobTop = this.position.y + this.definition.dimensions.height / 2;
+    if (mobBottom >= playerPosition.y + playerHeight || mobTop <= playerPosition.y) return;
+
+    const playerRadius = Math.hypot(playerWidth, playerLength) / 2;
+    this.separateFrom(playerPosition.x, playerPosition.z, playerRadius);
+  }
+
+  resolveCollisionWith(other: HostileMob): void {
+    if (this.disposed || other.disposed) return;
+    const combinedHalfHeight = (
+      this.definition.dimensions.height + other.definition.dimensions.height
+    ) / 2;
+    if (Math.abs(this.position.y - other.position.y) >= combinedHalfHeight) return;
+
+    const ownRadius = Math.hypot(
+      this.definition.dimensions.width,
+      this.definition.dimensions.length,
+    ) / 2;
+    const otherRadius = Math.hypot(
+      other.definition.dimensions.width,
+      other.definition.dimensions.length,
+    ) / 2;
+    const directionX = this.position.x - other.position.x;
+    const directionZ = this.position.z - other.position.z;
+    const distance = Math.hypot(directionX, directionZ);
+    const overlap = ownRadius + otherRadius - distance;
+    if (overlap <= 0) return;
+
+    const normalX = distance > 0.001 ? directionX / distance : 1;
+    const normalZ = distance > 0.001 ? directionZ / distance : 0;
+    this.position.x += normalX * overlap / 2;
+    this.position.z += normalZ * overlap / 2;
+    this.clampToArena();
+    this.syncMeshPosition();
+    other.position.x -= normalX * overlap / 2;
+    other.position.z -= normalZ * overlap / 2;
+    other.clampToArena();
+    other.syncMeshPosition();
+  }
+
   dispose(): void {
     this.removeFromScene();
+  }
+
+  private separateFrom(otherX: number, otherZ: number, otherRadius: number): number {
+    const radius = Math.hypot(
+      this.definition.dimensions.width,
+      this.definition.dimensions.length,
+    ) / 2;
+    const directionX = this.position.x - otherX;
+    const directionZ = this.position.z - otherZ;
+    const distance = Math.hypot(directionX, directionZ);
+    const overlap = radius + otherRadius - distance;
+    if (overlap <= 0) return 0;
+
+    const normalX = distance > 0.001 ? directionX / distance : 1;
+    const normalZ = distance > 0.001 ? directionZ / distance : 0;
+    this.position.x += normalX * overlap;
+    this.position.z += normalZ * overlap;
+    this.clampToArena();
+    this.syncMeshPosition();
+    return overlap;
+  }
+
+  private clampToArena(): void {
+    const horizontalRadius = Math.hypot(
+      this.definition.dimensions.width,
+      this.definition.dimensions.length,
+    ) / 2;
+    this.position.x = THREE.MathUtils.clamp(
+      this.position.x,
+      -ARENA_HALF_EXTENT + horizontalRadius,
+      ARENA_HALF_EXTENT - horizontalRadius,
+    );
+    this.position.z = THREE.MathUtils.clamp(
+      this.position.z,
+      -ARENA_HALF_EXTENT + horizontalRadius,
+      ARENA_HALF_EXTENT - horizontalRadius,
+    );
+  }
+
+  private syncMeshPosition(): void {
+    this.mesh.position.copy(this.position);
+    this.mesh.updateMatrixWorld(true);
   }
 
   private updateDefeatKnockback(delta: number): void {
