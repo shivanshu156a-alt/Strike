@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
@@ -38,8 +39,23 @@ const CAMERA_MODE_TRANSITION_DURATION = 0.2;
 const PLAYER_ANIMATION_FADE_DURATION = 0.2;
 const CROUCH_TRANSITION_SPEED = 2.5;
 const PUNCH_ANIMATION_SPEED = 2.5;
+const TOUCH_LOOK_SENSITIVITY_MULTIPLIER = 3;
+const TOUCH_DOUBLE_TAP_INTERVAL = 320;
 const WORLD_AIM_POINT_DISTANCE = 8;
 const PLAYER_CHARACTER_URL = new URL('../3D/character.glb', import.meta.url).href;
+const HOSTILE_MOB_MODEL_URLS: Partial<Record<string, string>> = {
+  'normal-melee-attacker': new URL('../3D/Normal Melee Attacker.glb', import.meta.url).href,
+  shooter: new URL('../3D/Shooter.glb', import.meta.url).href,
+  'annoying-mob': new URL('../3D/Annoying mob.glb', import.meta.url).href,
+  'teleporting-ghost': new URL('../3D/Teleporting ghost.glb', import.meta.url).href,
+};
+const HOSTILE_MOB_ANIMATIONS = {
+  idle: 'idle',
+  walking: 'walking',
+  running: 'running',
+  attack: 'punch',
+  defeated: 'death',
+} as const;
 
 type PlayerAnimation =
   | 'idle'
@@ -110,11 +126,12 @@ function retargetClipToCharacter(
   skinnedMeshes: readonly THREE.SkinnedMesh[],
   preserveRootRotation: boolean,
   preserveRootVerticalTranslation = false,
+  requireEveryTrack = true,
 ): THREE.AnimationClip {
   const bonesByName = new Map<string, Set<THREE.Bone>>();
   skinnedMeshes.forEach((mesh) => {
     mesh.skeleton.bones.forEach((bone) => {
-      const normalizedName = bone.name.replace(/^mixamorig_?/, 'mixamorig');
+      const normalizedName = normalizeMixamoBoneName(bone.name);
       const matchingBones = bonesByName.get(normalizedName) ?? new Set<THREE.Bone>();
       matchingBones.add(bone);
       bonesByName.set(normalizedName, matchingBones);
@@ -126,10 +143,11 @@ function retargetClipToCharacter(
     const separator = track.name.lastIndexOf('.');
     const targetName = track.name.slice(0, separator);
     const propertyName = track.name.slice(separator + 1);
-    const normalizedName = targetName.replace(/^mixamorig_?/, 'mixamorig');
+    const normalizedName = normalizeMixamoBoneName(targetName);
     const matchingBones = bonesByName.get(normalizedName);
     if (separator <= 0 || !matchingBones?.size) {
-      throw new Error(`Animation track "${track.name}" has no matching player bone.`);
+      if (!requireEveryTrack) return;
+      throw new Error(`Animation track "${track.name}" has no matching target bone.`);
     }
     let sourceTrack = track;
     if (normalizedName === 'mixamorigHips' && propertyName === 'position') {
@@ -155,7 +173,14 @@ function retargetClipToCharacter(
       tracks.push(retargetedTrack);
     });
   });
+  if (tracks.length === 0) {
+    throw new Error(`Animation clip "${clip.name}" has no tracks matching the target skeleton.`);
+  }
   return new THREE.AnimationClip(clip.name, clip.duration, tracks, clip.blendMode);
+}
+
+function normalizeMixamoBoneName(name: string): string {
+  return name.replace(/^mixamorig\d*[_:]?/i, 'mixamorig');
 }
 
 export type GameAction =
@@ -199,11 +224,13 @@ export class Game {
   private readonly attackStatus: HTMLElement;
   private readonly spawnProtectionMessage: HTMLElement;
   private readonly deathScreen: HTMLElement;
+  private readonly selectedWeaponIndicator: HTMLElement;
   private readonly playerHealthElements: {
     label: HTMLElement;
     track: HTMLElement;
     fill: HTMLElement;
   };
+  private readonly touchPointerButtons = new Map<number, HTMLButtonElement>();
   private readonly mobHealthRows = new Map<string, {
     card: HTMLElement;
     fill: HTMLElement;
@@ -212,6 +239,8 @@ export class Game {
   private readonly hostileMobs: HostileMob[] = [];
   private readonly keys = new Set<string>();
   private readonly touchKeys = new Set<string>();
+  private readonly touchSprintKeys = new Set<string>();
+  private readonly lastTouchDirectionTap = new Map<string, number>();
   private readonly velocity = new THREE.Vector3();
   private readonly knockbackVelocity = new THREE.Vector3();
   private readonly playerPosition = new THREE.Vector3(0, 0, 5);
@@ -230,6 +259,7 @@ export class Game {
   private readonly cameraTransitionStart = new THREE.Quaternion();
   private readonly lookSensitivity: number;
   private readonly playerAnimationActions = new Map<PlayerAnimation, THREE.AnimationAction>();
+  private readonly sharedPlayerAnimationClips = new Map<PlayerAnimation, THREE.AnimationClip>();
   private playerCharacter: THREE.Group | undefined;
   private playerMixer: THREE.AnimationMixer | undefined;
   private activePlayerAction: THREE.AnimationAction | undefined;
@@ -279,6 +309,7 @@ export class Game {
     this.attackStatus = hudElements.attackStatus;
     this.spawnProtectionMessage = hudElements.spawnProtectionMessage;
     this.deathScreen = hudElements.deathScreen;
+    this.selectedWeaponIndicator = hudElements.selectedWeaponIndicator;
     this.playerHealthElements = hudElements.playerHealth;
     this.touchControls = this.createTouchControls(container);
 
@@ -308,6 +339,7 @@ export class Game {
 
     buildMap(this.scene, map);
     if (this.mobsEnabled) this.spawnHostileMobs();
+    if (this.mobsEnabled) void this.loadHostileMobModels();
     this.attachEvents();
     this.updateCamera(0);
     void this.loadPlayerCharacter();
@@ -341,7 +373,7 @@ export class Game {
         throw new Error('character.glb does not contain a skinned player character.');
       }
       const characterBones = new Set(skinnedMeshes.flatMap(
-        (mesh) => mesh.skeleton.bones.map((bone) => bone.name.replace(/^mixamorig_?/, 'mixamorig')),
+        (mesh) => mesh.skeleton.bones.map((bone) => normalizeMixamoBoneName(bone.name)),
       ));
       if (characterBones.size === 0) {
         throw new Error('character.glb does not contain a usable Mixamo skeleton.');
@@ -375,55 +407,77 @@ export class Game {
       loadedCharacter = undefined;
       loadedMixer = undefined;
 
-      const animationRigs = await Promise.all(
+      const animationResults = await Promise.allSettled(
         animationEntries.map(([, url]) => animationLoader.loadAsync(url)),
       );
       if (this.disposed) return;
 
-      const animationActions = new Map<PlayerAnimation, THREE.AnimationAction>();
+      const sharedMobAnimations = new Set<PlayerAnimation>(Object.values(HOSTILE_MOB_ANIMATIONS));
+      const loadedClips = new Map<PlayerAnimation, THREE.AnimationClip>();
       animationEntries.forEach(([animation, url], index) => {
-        const [clip] = animationRigs[index].animations.filter((candidate) => candidate.tracks.length > 0);
-        if (!clip) throw new Error(`Animation file "${url}" contains no usable animation clip.`);
-        const preserveRootRotation = ![
-          'strafeLeft',
-          'strafeRight',
-          'walkStrafeLeft',
-          'walkStrafeRight',
-          'turnLeft',
-          'turnRight',
-          'turnLeft90',
-          'turnRight90',
-        ].includes(animation);
-        const retargetedClip = retargetClipToCharacter(
-          clip,
-          skinnedMeshes,
-          preserveRootRotation,
-          animation === 'death',
-        );
-        const action = mixer.clipAction(retargetedClip);
-        if (
-          animation === 'jump'
-          || animation === 'crouchDown'
-          || animation === 'crouchUp'
-          || animation === 'punch'
-          || animation === 'death'
-          || animation.startsWith('turn')
-        ) {
-          action.setLoop(THREE.LoopOnce, 1);
-          action.clampWhenFinished = true;
-        } else {
-          action.setLoop(THREE.LoopRepeat, Infinity);
+        const result = animationResults[index];
+        if (result.status === 'rejected') {
+          console.warn(`Unable to load optional player animation "${url}".`, result.reason);
+          return;
         }
-        if (animation === 'crouchDown' || animation === 'crouchUp') {
-          action.timeScale = CROUCH_TRANSITION_SPEED;
-        } else if (animation === 'punch') {
-          action.timeScale = PUNCH_ANIMATION_SPEED;
+        const clip = result.value.animations.find((candidate) => candidate.tracks.length > 0);
+        if (!clip) {
+          console.warn(`Animation file "${url}" contains no usable animation clip.`);
+          return;
         }
-        animationActions.set(animation, action);
+        loadedClips.set(animation, clip);
+        if (sharedMobAnimations.has(animation)) this.sharedPlayerAnimationClips.set(animation, clip);
+      });
+      this.attachHostileMobAnimations();
+
+      const animationActions = new Map<PlayerAnimation, THREE.AnimationAction>();
+      animationEntries.forEach(([animation, url]) => {
+        const clip = loadedClips.get(animation);
+        if (!clip) return;
+        try {
+          const preserveRootRotation = ![
+            'strafeLeft',
+            'strafeRight',
+            'walkStrafeLeft',
+            'walkStrafeRight',
+            'turnLeft',
+            'turnRight',
+            'turnLeft90',
+            'turnRight90',
+          ].includes(animation);
+          const retargetedClip = retargetClipToCharacter(
+            clip,
+            skinnedMeshes,
+            preserveRootRotation,
+            animation === 'death',
+          );
+          const action = mixer.clipAction(retargetedClip);
+          if (
+            animation === 'jump'
+            || animation === 'crouchDown'
+            || animation === 'crouchUp'
+            || animation === 'punch'
+            || animation === 'death'
+            || animation.startsWith('turn')
+          ) {
+            action.setLoop(THREE.LoopOnce, 1);
+            action.clampWhenFinished = true;
+          } else {
+            action.setLoop(THREE.LoopRepeat, Infinity);
+          }
+          if (animation === 'crouchDown' || animation === 'crouchUp') {
+            action.timeScale = CROUCH_TRANSITION_SPEED;
+          } else if (animation === 'punch') {
+            action.timeScale = PUNCH_ANIMATION_SPEED;
+          }
+          animationActions.set(animation, action);
+        } catch (error) {
+          console.warn(`Unable to retarget optional player animation "${url}".`, error);
+        }
       });
 
-      if (animationActions.size !== animationEntries.length) {
-        throw new Error('Not all player animation files produced a usable action.');
+      if (animationActions.size === 0) {
+        console.warn('Player character loaded without any usable animation actions.');
       }
 
       animationActions.forEach((action, animation) => {
@@ -498,6 +552,7 @@ export class Game {
     deathScreen: HTMLElement;
     spawnProtectionMessage: HTMLElement;
     attackStatus: HTMLElement;
+    selectedWeaponIndicator: HTMLElement;
     playerHealth: { label: HTMLElement; track: HTMLElement; fill: HTMLElement };
   } {
     const hud = document.createElement('aside');
@@ -531,7 +586,14 @@ export class Game {
     deathTitle.textContent = 'Dead';
     const deathPrompt = document.createElement('p');
     deathPrompt.textContent = 'Press Esc to return to the menu';
-    deathCard.append(deathTitle, deathPrompt);
+    const deathMenuButton = document.createElement('button');
+    deathMenuButton.className = 'death-menu-button';
+    deathMenuButton.type = 'button';
+    deathMenuButton.textContent = 'Main Menu';
+    deathMenuButton.addEventListener('click', () => {
+      this.canvas.dispatchEvent(new Event('gameexit', { bubbles: true }));
+    });
+    deathCard.append(deathTitle, deathPrompt, deathMenuButton);
     deathScreen.appendChild(deathCard);
     container.appendChild(deathScreen);
 
@@ -550,8 +612,27 @@ export class Game {
     const playerHealthFill = document.createElement('div');
     playerHealthFill.className = 'player-health-fill';
     playerHealthTrack.appendChild(playerHealthFill);
-    playerHealth.append(playerHealthLabel, playerHealthTrack);
+    const mobileHealthRow = document.createElement('div');
+    mobileHealthRow.className = 'mobile-health-row';
+    mobileHealthRow.innerHTML = `
+      <svg class="pixel-heart" viewBox="0 0 16 16" aria-hidden="true" shape-rendering="crispEdges">
+        <path fill="#29243b" d="M2 1h4v1h4V1h4v1h1v5h-1v2h-2v2H9v2H7v-2H5V9H3V7H1V2h1z"/>
+        <path fill="#f35f72" d="M2 2h4v2h2V2h4v1h1v4h-2v2H9v2H7V9H5V7H3V3H2z"/>
+        <path fill="#ffb5a8" d="M3 3h2v2H3zm6 0h2v2H9z"/>
+      </svg>
+    `;
+    mobileHealthRow.appendChild(playerHealthTrack);
+    const mobileHealthLabel = document.createElement('div');
+    mobileHealthLabel.className = 'mobile-health-label';
+    mobileHealthLabel.textContent = 'Health';
+    playerHealth.append(playerHealthLabel, mobileHealthRow, mobileHealthLabel);
     hud.appendChild(playerHealth);
+
+    const selectedWeaponIndicator = document.createElement('div');
+    selectedWeaponIndicator.className = 'mobile-selected-weapon';
+    selectedWeaponIndicator.setAttribute('aria-live', 'polite');
+    selectedWeaponIndicator.textContent = `Weapon: ${this.player.selectedAttack.name}`;
+    hud.appendChild(selectedWeaponIndicator);
 
     const mobList = document.createElement('div');
     mobList.className = 'mob-health-list';
@@ -584,6 +665,7 @@ export class Game {
       deathScreen,
       spawnProtectionMessage,
       attackStatus,
+      selectedWeaponIndicator,
       playerHealth: {
         label: playerHealthLabel,
         track: playerHealthTrack,
@@ -597,45 +679,47 @@ export class Game {
     controls.className = 'touch-controls';
     controls.setAttribute('aria-label', 'Touch game controls');
     controls.innerHTML = `
-      <div class="touch-group touch-movement" aria-label="Movement">
-        <button class="touch-button touch-up" type="button" data-hold-key="KeyW" aria-label="Move forward">▲</button>
-        <button class="touch-button touch-left" type="button" data-hold-key="KeyA" aria-label="Move left">◀</button>
-        <button class="touch-button touch-down" type="button" data-hold-key="KeyS" aria-label="Move backward">▼</button>
-        <button class="touch-button touch-right" type="button" data-hold-key="KeyD" aria-label="Move right">▶</button>
+      <div class="touch-dpad" role="group" aria-label="Movement">
+        <span class="touch-dpad-center" aria-hidden="true"></span>
+        <button class="touch-button touch-up" type="button" data-hold-key="KeyW" aria-label="Move forward">⌃</button>
+        <button class="touch-button touch-left" type="button" data-hold-key="KeyA" aria-label="Move left">‹</button>
+        <button class="touch-button touch-down" type="button" data-hold-key="KeyS" aria-label="Move backward">⌄</button>
+        <button class="touch-button touch-right" type="button" data-hold-key="KeyD" aria-label="Move right">›</button>
       </div>
-      <div class="touch-group touch-core" aria-label="Movement actions">
-        <button class="touch-button" type="button" data-hold-key="Space">Jump</button>
-        <button class="touch-button" type="button" data-hold-key="ShiftLeft">Sprint</button>
-        <button class="touch-button" type="button" data-hold-key="ControlLeft">Crouch</button>
-        <button class="touch-button" type="button" data-camera-view>Camera</button>
-        <button class="touch-button" type="button" data-hold-action="focus">Focus</button>
-        <button class="touch-button touch-primary" type="button" data-hold-action="attack">Attack</button>
-        <button class="touch-button" type="button" data-game-exit>Menu</button>
+      <button class="touch-button touch-view" type="button" data-camera-view aria-label="Change View">
+        <svg viewBox="0 0 48 36" aria-hidden="true">
+          <path d="M3 8a4 4 0 0 1 4-4h22a4 4 0 0 1 4 4v20a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4zM33 13l11-7v24l-11-7" />
+        </svg>
+        <span>Change View</span>
+      </button>
+      <div class="touch-weapon">
+        <span>Change Weapon</span>
+        <button class="touch-button" type="button" data-weapon-swap="1" aria-label="Change Weapon">
+          <svg viewBox="0 0 48 48" aria-hidden="true">
+            <path d="M38 20a15 15 0 0 0-27-7l-4 5m0 0v-9m0 9h9M10 28a15 15 0 0 0 27 7l4-5m0 0v9m0-9h-9" />
+          </svg>
+        </button>
       </div>
-      <div class="touch-toolbar" aria-label="Combat and game actions">
-        <div class="touch-group" aria-label="Select attack">
-          <button class="touch-button" type="button" data-attack-index="0">Fists</button>
-          <button class="touch-button" type="button" data-attack-index="1">Melee</button>
-          <button class="touch-button" type="button" data-attack-index="2">Shooter</button>
-        </div>
-        <div class="touch-group" aria-label="Other actions">
-          <button class="touch-button" type="button" data-action="reload">Reload</button>
-          <button class="touch-button" type="button" data-action="defend">Defend</button>
-          <button class="touch-button" type="button" data-action="equip">Equip</button>
-          <button class="touch-button" type="button" data-action="special">Special</button>
-          <button class="touch-button" type="button" data-weapon-swap="-1">Previous weapon</button>
-          <button class="touch-button" type="button" data-weapon-swap="1">Next weapon</button>
-        </div>
-        <div class="touch-group touch-elements" aria-label="Select element">
-          ${Array.from({ length: 9 }, (_, index) => `<button class="touch-button" type="button" data-element-slot="${index + 1}">Element ${index + 1}</button>`).join('')}
-        </div>
+      <button class="touch-button touch-attack" type="button" data-hold-action="attack" aria-label="Attack">
+        <svg viewBox="0 0 48 48" aria-hidden="true">
+          <path d="M24 5 43 24 24 43 5 24z" />
+        </svg>
+      </button>
+      <div class="touch-mobility">
+        <button class="touch-button" type="button" data-hold-key="Space" aria-label="Jump">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="m6 20 10-10 10 10" /></svg>
+        </button>
+        <span>Jump</span>
+        <button class="touch-button" type="button" data-hold-key="ControlLeft" aria-label="Crouch">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="m6 12 10 10 10-10" /></svg>
+        </button>
+        <span>Crouch</span>
       </div>
     `;
     controls.addEventListener('pointerdown', this.onTouchPointerDown);
     controls.addEventListener('pointerup', this.onTouchPointerEnd);
     controls.addEventListener('pointercancel', this.onTouchPointerEnd);
     controls.addEventListener('lostpointercapture', this.onTouchPointerEnd);
-    controls.addEventListener('click', this.onTouchClick);
     container.appendChild(controls);
     return controls;
   }
@@ -658,6 +742,76 @@ export class Game {
         (health) => this.updateMobHealth(health),
       ));
     });
+  }
+
+  private async loadHostileMobModels(): Promise<void> {
+    const dracoLoader = new DRACOLoader();
+    dracoLoader.setDecoderPath(new URL('./', document.baseURI).href);
+    const loader = new GLTFLoader();
+    loader.setMeshoptDecoder(MeshoptDecoder);
+    loader.setDRACOLoader(dracoLoader);
+    await Promise.all(Object.entries(HOSTILE_MOB_MODEL_URLS).map(async ([id, url]) => {
+      if (!url) return;
+      let loadedScene: THREE.Group | undefined;
+      try {
+        const asset = await loader.loadAsync(url);
+        loadedScene = asset.scene;
+        if (this.disposed) {
+          disposeObjectResources(loadedScene);
+          loadedScene = undefined;
+          return;
+        }
+        const mob = this.hostileMobs.find((candidate) => candidate.definition.id === id);
+        if (!mob || mob.isDefeated) {
+          disposeObjectResources(loadedScene);
+          loadedScene = undefined;
+          if (!mob) throw new Error(`No spawned hostile mob matches model "${id}".`);
+          return;
+        }
+        mob.setVisualModel(loadedScene);
+        this.attachHostileMobAnimations();
+        loadedScene = undefined;
+      } catch (error) {
+        if (loadedScene) disposeObjectResources(loadedScene);
+        this.hostileMobs
+          .find((candidate) => candidate.definition.id === id)
+          ?.showCollisionProxy();
+        console.error(`Unable to load the ${id} hostile mob model.`, error);
+      }
+    }));
+  }
+
+  private attachHostileMobAnimations(): void {
+    if (this.sharedPlayerAnimationClips.size === 0) return;
+
+    for (const mob of this.hostileMobs) {
+      const skinnedMeshes: THREE.SkinnedMesh[] = [];
+      mob.visualModel?.traverse((object) => {
+        if (object instanceof THREE.SkinnedMesh) skinnedMeshes.push(object);
+      });
+      if (skinnedMeshes.length === 0) continue;
+
+      const clips: Partial<Record<keyof typeof HOSTILE_MOB_ANIMATIONS, THREE.AnimationClip>> = {};
+      for (const [state, animation] of Object.entries(HOSTILE_MOB_ANIMATIONS) as [
+        keyof typeof HOSTILE_MOB_ANIMATIONS,
+        PlayerAnimation,
+      ][]) {
+        const sourceClip = this.sharedPlayerAnimationClips.get(animation);
+        if (!sourceClip) continue;
+        try {
+          clips[state] = retargetClipToCharacter(
+            sourceClip,
+            skinnedMeshes,
+            true,
+            false,
+            false,
+          );
+        } catch (error) {
+          console.warn(`Unable to retarget the ${animation} animation to ${mob.definition.name}.`, error);
+        }
+      }
+      mob.setAnimationClips(clips);
+    }
   }
 
   private updateMobHealth(health: HostileMobHealth): void {
@@ -758,6 +912,9 @@ export class Game {
   private clearKeys = (): void => {
     this.keys.clear();
     this.touchKeys.clear();
+    this.touchSprintKeys.clear();
+    this.lastTouchDirectionTap.clear();
+    this.touchPointerButtons.clear();
     this.touchControls.querySelectorAll<HTMLButtonElement>('button[data-pressed="true"]')
       .forEach((button) => {
         delete button.dataset.pressed;
@@ -923,79 +1080,35 @@ export class Game {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
     if (!button || !this.touchControls.contains(button)) return;
     event.preventDefault();
-    if (this.gameOver && !button.hasAttribute('data-game-exit')) return;
+    event.stopPropagation();
+    if (this.gameOver) return;
     if (this.paused) this.startGame();
+    this.touchPointerButtons.set(event.pointerId, button);
+    button.setPointerCapture(event.pointerId);
 
     const holdKey = button.dataset.holdKey;
     if (holdKey) {
       button.dataset.pressed = 'true';
       button.classList.add('is-pressed');
       this.touchKeys.add(holdKey);
+      if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(holdKey)) {
+        const now = performance.now();
+        const previousTap = this.lastTouchDirectionTap.get(holdKey);
+        if (previousTap !== undefined && now - previousTap <= TOUCH_DOUBLE_TAP_INTERVAL) {
+          this.touchSprintKeys.add(holdKey);
+          this.lastTouchDirectionTap.delete(holdKey);
+        }
+      }
       if (holdKey === 'Space') this.jumpHeld = true;
-      button.setPointerCapture(event.pointerId);
       return;
     }
 
     const holdAction = button.dataset.holdAction as GameAction | undefined;
-    if (!holdAction) return;
-    button.dataset.pressed = 'true';
-    button.classList.add('is-pressed');
-    this.emitAction(holdAction, true);
-    if (holdAction === 'attack') this.performAttack();
-    button.setPointerCapture(event.pointerId);
-  };
-
-  private onTouchPointerEnd = (event: PointerEvent): void => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
-    if (!button || !this.touchControls.contains(button)) return;
-    this.releaseTouchButton(button);
-  };
-
-  private onAnyTouchPointerEnd = (event: PointerEvent): void => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
-    if (button && this.touchControls.contains(button)) this.releaseTouchButton(button);
-  };
-
-  private releaseTouchButton(button: HTMLButtonElement): void {
-    if (button.dataset.pressed !== 'true') return;
-    delete button.dataset.pressed;
-    button.classList.remove('is-pressed');
-
-    const holdKey = button.dataset.holdKey;
-    if (holdKey) {
-      this.touchKeys.delete(holdKey);
-      if (holdKey === 'Space') this.jumpHeld = this.isKeyDown('Space');
-    }
-
-    const holdAction = button.dataset.holdAction as GameAction | undefined;
-    if (holdAction) this.emitAction(holdAction, false);
-  }
-
-  private onTouchClick = (event: MouseEvent): void => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
-    if (!button || !this.touchControls.contains(button)) return;
-    if (this.gameOver && !button.hasAttribute('data-game-exit')) return;
-    if (this.paused) this.startGame();
-
-    const attackIndex = Number(button.dataset.attackIndex);
-    if (button.dataset.attackIndex !== undefined) {
-      this.selectAttack(attackIndex);
-      return;
-    }
-
-    const action = button.dataset.action as GameAction | undefined;
-    if (action) {
-      this.emitAction(action);
-      return;
-    }
-
-    if (button.dataset.elementSlot !== undefined) {
-      this.emitAction('element-select', Number(button.dataset.elementSlot));
-      return;
-    }
-
-    if (button.dataset.weaponSwap !== undefined) {
-      this.changeWeapon(Number(button.dataset.weaponSwap));
+    if (holdAction) {
+      button.dataset.pressed = 'true';
+      button.classList.add('is-pressed');
+      this.emitAction(holdAction, true);
+      if (holdAction === 'attack') this.performAttack();
       return;
     }
 
@@ -1004,10 +1117,46 @@ export class Game {
       return;
     }
 
-    if (button.hasAttribute('data-game-exit')) {
-      this.canvas.dispatchEvent(new Event('gameexit', { bubbles: true }));
+    if (button.dataset.weaponSwap !== undefined) {
+      this.changeWeapon(Number(button.dataset.weaponSwap));
     }
   };
+
+  private onTouchPointerEnd = (event: PointerEvent): void => {
+    const button = this.touchPointerButtons.get(event.pointerId);
+    if (!button) return;
+    this.releaseTouchButton(button, event.pointerId);
+  };
+
+  private onAnyTouchPointerEnd = (event: PointerEvent): void => {
+    const button = this.touchPointerButtons.get(event.pointerId);
+    if (button) this.releaseTouchButton(button, event.pointerId);
+  };
+
+  private releaseTouchButton(button: HTMLButtonElement, pointerId: number): void {
+    this.touchPointerButtons.delete(pointerId);
+    const stillPressed = [...this.touchPointerButtons.values()].includes(button);
+    if (stillPressed || button.dataset.pressed !== 'true') return;
+    delete button.dataset.pressed;
+    button.classList.remove('is-pressed');
+
+    const holdKey = button.dataset.holdKey;
+    if (holdKey) {
+      const anotherPointerHoldingKey = [...this.touchPointerButtons.values()]
+        .some((pressedButton) => pressedButton.dataset.holdKey === holdKey);
+      if (!anotherPointerHoldingKey) {
+        this.touchKeys.delete(holdKey);
+        if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(holdKey)) {
+          this.touchSprintKeys.delete(holdKey);
+          this.lastTouchDirectionTap.set(holdKey, performance.now());
+        }
+      }
+      if (holdKey === 'Space') this.jumpHeld = this.isKeyDown('Space');
+    }
+
+    const holdAction = button.dataset.holdAction as GameAction | undefined;
+    if (holdAction) this.emitAction(holdAction, false);
+  }
 
   private changeWeapon(direction: number): void {
     if (direction === 0) return;
@@ -1043,6 +1192,7 @@ export class Game {
   private selectAttack(index: number): void {
     if (!this.player.selectAttack(index)) return;
     this.updateAttackStatus(this.attackStatus);
+    this.selectedWeaponIndicator.textContent = `Weapon: ${this.player.selectedAttack.name}`;
     this.canvas.dispatchEvent(new CustomEvent<{ id: PlayerAttackId; index: number }>('attackselect', {
       bubbles: true,
       detail: { id: this.player.selectedAttack.id, index },
@@ -1060,6 +1210,12 @@ export class Game {
 
   private isKeyDown(code: string): boolean {
     return this.keys.has(code) || this.touchKeys.has(code);
+  }
+
+  private isSprinting(): boolean {
+    return this.isKeyDown('ShiftLeft')
+      || this.isKeyDown('ShiftRight')
+      || [...this.touchSprintKeys].some((code) => this.isKeyDown(code));
   }
 
   private emitAction(action: GameAction, value?: number | boolean): void {
@@ -1157,6 +1313,7 @@ export class Game {
     this.updateLook(
       event.clientX - this.lastTouchLookX,
       event.clientY - this.lastTouchLookY,
+      true,
     );
     this.lastTouchLookX = event.clientX;
     this.lastTouchLookY = event.clientY;
@@ -1166,11 +1323,13 @@ export class Game {
     if (event.pointerId === this.touchLookPointerId) this.touchLookPointerId = undefined;
   };
 
-  private updateLook(movementX: number, movementY: number): void {
-    const yawChange = -movementX * 0.0022 * this.lookSensitivity;
+  private updateLook(movementX: number, movementY: number, touch = false): void {
+    const sensitivity = 0.0022 * this.lookSensitivity
+      * (touch ? TOUCH_LOOK_SENSITIVITY_MULTIPLIER : 1);
+    const yawChange = -movementX * sensitivity;
     this.yaw += yawChange;
     this.pitch = THREE.MathUtils.clamp(
-      this.pitch - movementY * 0.0022 * this.lookSensitivity,
+      this.pitch - movementY * sensitivity,
       -1.48,
       1.48,
     );
@@ -1226,8 +1385,7 @@ export class Game {
     if (direction.lengthSq() > 0) direction.normalize();
 
     const crouching = this.isCrouching();
-    const sprinting = !crouching
-      && (this.isKeyDown('ShiftLeft') || this.isKeyDown('ShiftRight'));
+    const sprinting = !crouching && this.isSprinting();
     const speed = crouching ? CROUCH_SPEED : sprinting ? SPRINT_SPEED : WALK_SPEED;
     this.velocity.lerp(direction.multiplyScalar(speed), 1 - Math.exp(-14 * delta));
     this.playerPosition.addScaledVector(this.velocity, delta);

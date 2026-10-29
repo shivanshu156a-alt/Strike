@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   base: './',
+  publicDir: 'node_modules/three/examples/jsm/libs/draco/gltf',
   server: { host: '0.0.0.0' },
   build: {
     rollupOptions: {

@@ -186,6 +186,10 @@ input {
   pointer-events: none;
 }
 
+.mobile-selected-weapon {
+  display: none;
+}
+
 .game-crosshair {
   position: fixed;
   z-index: 1;
@@ -249,7 +253,7 @@ input {
     linear-gradient(0deg, rgb(10 4 7 / 58%), rgb(10 4 7 / 24%));
   color: #f4eee3;
   inset: 0;
-  pointer-events: none;
+  pointer-events: auto;
   animation: death-screen-fade-in 1.4s ease-out both;
 }
 
@@ -276,6 +280,25 @@ input {
   color: rgb(244 238 227 / 78%);
   font: 14px/1.5 Arial, sans-serif;
   letter-spacing: 0.08em;
+}
+
+.death-menu-button {
+  margin-top: 20px;
+  padding: 10px 20px;
+  border: 1px solid rgb(244 238 227 / 72%);
+  border-radius: 4px;
+  background: rgb(10 18 28 / 82%);
+  color: #f4eee3;
+  font: 600 14px/1.2 Arial, sans-serif;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.death-menu-button:hover,
+.death-menu-button:focus-visible {
+  background: rgb(39 62 82 / 92%);
+  outline: 2px solid #a5e7ff;
+  outline-offset: 3px;
 }
 
 @keyframes death-screen-fade-in {
@@ -337,6 +360,19 @@ input {
 
 .mob-health-card.is-defeated {
   opacity: 0.48;
+}
+
+.mobile-health-row {
+  display: contents;
+}
+
+.touch-controls {
+  display: none;
+}
+
+.pixel-heart,
+.mobile-health-label {
+  display: none;
 }
 
 .menu-dialog {
@@ -439,55 +475,6 @@ input {
   outline-offset: 3px;
 }
 
-.touch-controls {
-  position: fixed;
-  z-index: 3;
-  inset: 0;
-  display: none;
-  pointer-events: none;
-  font-family: Arial, sans-serif;
-}
-
-.touch-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
-.touch-button {
-  min-width: 42px;
-  min-height: 42px;
-  padding: 7px 10px;
-  border: 1px solid rgb(154 213 239 / 58%);
-  border-radius: 10px;
-  background: rgb(12 24 36 / 82%);
-  box-shadow: 0 3px 10px rgb(0 0 0 / 35%);
-  color: #f2f8ff;
-  font: 600 12px/1.1 Arial, sans-serif;
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.touch-button:active,
-.touch-button.is-pressed {
-  border-color: #8de5ff;
-  background: rgb(33 110 151 / 94%);
-  transform: scale(0.96);
-}
-
-.touch-button:focus-visible {
-  outline: 2px solid #a5e7ff;
-  outline-offset: 2px;
-}
-
-.touch-primary {
-  border-color: rgb(255 143 134 / 75%);
-  background: rgb(117 35 39 / 88%);
-}
-
 @media (max-height: 500px) {
   .menu-dialog {
     max-height: calc(100vh - 24px);
@@ -509,6 +496,7 @@ input {
   body {
     min-width: 0;
     overscroll-behavior: none;
+    touch-action: none;
   }
 
   .menu-hit-area {
@@ -523,117 +511,343 @@ input {
   .menu-quit { top: 76%; }
 
   .game-hud {
-    top: max(8px, env(safe-area-inset-top));
-    left: max(8px, env(safe-area-inset-left));
-    gap: 5px;
-    width: min(230px, 58vw);
-    max-height: 32dvh;
-    padding: 8px;
-    overflow-y: auto;
-    font-size: 11px;
+    top: max(12px, env(safe-area-inset-top));
+    left: max(12px, env(safe-area-inset-left));
+    display: block;
+    width: auto;
+    padding: 0;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
   }
 
-  .mob-health-list {
-    gap: 4px 7px;
+  .game-hud > :not(.player-health):not(.mobile-selected-weapon) {
+    display: none;
+  }
+
+  .player-health {
+    display: grid;
+    gap: 0;
+    width: max-content;
+    font: 12px/1.1 Arial, sans-serif;
+    color: #fff;
+    text-shadow: 0 1px 3px #000;
+  }
+
+  .mobile-selected-weapon {
+    display: block;
+    margin: 3px 0 0 30px;
+    color: #fff;
+    font: 11px/1.2 Arial, sans-serif;
+    text-shadow: 0 1px 3px #000;
+  }
+
+  .player-health > .mob-health-label {
+    display: none;
+  }
+
+  .mobile-health-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+
+  .pixel-heart {
+    z-index: 1;
+    display: block;
+    width: 34px;
+    height: 34px;
+    flex: 0 0 auto;
+    margin-right: -6px;
+    filter: drop-shadow(0 1px 1px rgb(0 0 0 / 55%));
+  }
+
+  .player-health .mob-health-track {
+    width: clamp(112px, 38vw, 174px);
+    height: 22px;
+    overflow: hidden;
+    border: 4px solid #29243b;
+    border-radius: 0;
+    background: #9e8ca6;
+    box-shadow: 2px 2px 0 rgb(0 0 0 / 40%);
+  }
+
+  .player-health-fill {
+    border-radius: 0;
+    background: #68b657;
+    image-rendering: pixelated;
+  }
+
+  .mobile-health-label {
+    display: block;
+    margin-left: 30px;
+    font-size: 12px;
+    line-height: 1.2;
   }
 
   .touch-controls {
     display: block;
+    position: fixed;
+    z-index: 3;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    font-family: Arial, sans-serif;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
   }
 
-  .touch-controls .touch-group {
-    pointer-events: auto;
-  }
-
-  .touch-movement {
-    position: absolute;
-    bottom: max(12px, env(safe-area-inset-bottom));
-    left: max(10px, env(safe-area-inset-left));
+  .touch-button {
     display: grid;
-    grid-template: repeat(2, 48px) / repeat(2, 48px);
-    gap: 5px;
-  }
-
-  .touch-movement .touch-button {
-    width: 48px;
-    height: 48px;
-    padding: 0;
-    font-size: 18px;
-  }
-
-  .touch-core {
-    position: absolute;
-    right: max(10px, env(safe-area-inset-right));
-    bottom: max(12px, env(safe-area-inset-bottom));
-    display: grid;
-    grid-template-columns: repeat(3, minmax(46px, 1fr));
-    gap: 5px;
-    width: min(48vw, 220px);
-    pointer-events: auto;
-  }
-
-  .touch-core .touch-button {
+    place-items: center;
     min-width: 0;
-    min-height: 46px;
-    padding: 5px;
-  }
-
-  .touch-toolbar {
-    position: absolute;
-    right: max(8px, env(safe-area-inset-right));
-    bottom: calc(166px + env(safe-area-inset-bottom));
-    left: max(8px, env(safe-area-inset-left));
-    display: grid;
-    gap: 6px;
-    height: min(24dvh, 170px);
-    max-height: min(24dvh, 170px);
-    padding: 7px;
-    overflow: auto;
-    border: 1px solid rgb(136 194 220 / 42%);
-    border-radius: 12px;
-    background: rgb(10 18 28 / 76%);
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    color: #fff;
+    font: inherit;
+    cursor: pointer;
     pointer-events: auto;
-    scrollbar-width: thin;
-    overscroll-behavior: contain;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
   }
 
-  .touch-elements .touch-button {
-    min-width: 76px;
+  .touch-button:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 3px;
+  }
+
+  .touch-dpad {
+    --dpad-cell: clamp(38px, 12vw, 56px);
+    position: absolute;
+    bottom: max(18px, env(safe-area-inset-bottom));
+    left: max(14px, env(safe-area-inset-left));
+    display: grid;
+    grid-template:
+      " . up . " var(--dpad-cell)
+      "left center right" var(--dpad-cell)
+      " . down . " var(--dpad-cell)
+      / var(--dpad-cell) var(--dpad-cell) var(--dpad-cell);
+    width: calc(var(--dpad-cell) * 3);
+    height: calc(var(--dpad-cell) * 3);
+    filter: drop-shadow(2px 4px 2px rgb(0 0 0 / 45%));
+    pointer-events: auto;
+  }
+
+  .touch-dpad-center,
+  .touch-dpad .touch-button {
+    border: 3px solid #29243b;
+    border-radius: 0;
+    background: #f04e3a;
+    box-shadow: inset 0 0 0 3px #d83d35;
+  }
+
+  .touch-dpad .touch-button {
+    font: 700 clamp(19px, 6vw, 28px)/1 Arial, sans-serif;
+    text-shadow: 1px 1px #b33432;
+  }
+
+  .touch-dpad .touch-button:active,
+  .touch-dpad .touch-button.is-pressed {
+    background: #ff7150;
+    box-shadow: inset 0 0 0 3px #e64c3c;
+  }
+
+  .touch-dpad-center { grid-area: center; }
+  .touch-up { grid-area: up; }
+  .touch-left { grid-area: left; }
+  .touch-down { grid-area: down; }
+  .touch-right { grid-area: right; }
+
+  .touch-view {
+    position: absolute;
+    top: max(8px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    align-items: center;
+    border: 0;
+    background: transparent;
+    color: #fff;
+    font-size: 12px;
+    text-shadow: 0 1px 3px #000;
+  }
+
+  .touch-view svg {
+    width: clamp(48px, 14vw, 68px);
+    height: auto;
+    overflow: visible;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 3.5;
+  }
+
+  .touch-weapon {
+    position: absolute;
+    top: clamp(104px, 18dvh, 150px);
+    right: max(16px, env(safe-area-inset-right));
+    display: grid;
+    justify-items: center;
+    gap: 7px;
+    color: #fff;
+    font-size: 12px;
+    text-shadow: 0 1px 3px #000;
+    pointer-events: auto;
+  }
+
+  .touch-weapon button {
+    width: clamp(56px, 16vw, 72px);
+    height: clamp(56px, 16vw, 72px);
+    border: 2px solid rgb(255 255 255 / 78%);
+    border-radius: 50%;
+    background: rgb(235 235 235 / 88%);
+    box-shadow: 0 3px 9px rgb(0 0 0 / 35%), inset 0 1px 3px #fff;
+    color: #858585;
+  }
+
+  .touch-weapon button:active,
+  .touch-weapon button.is-pressed {
+    background: #fff;
+    transform: scale(0.94);
+  }
+
+  .touch-weapon svg {
+    width: 70%;
+    height: 70%;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 5;
+  }
+
+  .touch-attack {
+    position: absolute;
+    top: clamp(198px, 33dvh, 266px);
+    right: calc(max(16px, env(safe-area-inset-right)) + clamp(84px, 22vw, 122px));
+    width: clamp(72px, 20vw, 94px);
+    height: clamp(72px, 20vw, 94px);
+    border: 4px solid #234bc0;
+    border-radius: 50%;
+    background: #1452df;
+    box-shadow: 0 4px 10px rgb(0 0 0 / 42%), inset 0 0 0 4px rgb(9 34 134 / 65%);
+  }
+
+  .touch-attack:active,
+  .touch-attack.is-pressed {
+    background: #3376ff;
+    transform: scale(0.94);
+  }
+
+  .touch-attack svg {
+    width: 52%;
+    height: 52%;
+    fill: #fff;
+    stroke: #cfe0ff;
+    stroke-width: 2;
+    filter: drop-shadow(1px 2px 1px rgb(0 0 0 / 45%));
+  }
+
+  .touch-mobility {
+    position: absolute;
+    right: max(14px, env(safe-area-inset-right));
+    bottom: max(24px, env(safe-area-inset-bottom));
+    display: grid;
+    grid-template-columns: clamp(50px, 15vw, 66px) auto;
+    grid-template-rows: repeat(2, clamp(50px, 15vw, 66px));
+    gap: 10px 8px;
+    align-items: center;
+    color: #fff;
+    font-size: 13px;
+    text-shadow: 0 1px 3px #000;
+    pointer-events: auto;
+  }
+
+  .touch-mobility .touch-button {
+    width: 100%;
+    height: 100%;
+    border: 2px solid #dedede;
+    border-radius: 50%;
+    background: rgb(245 245 245 / 92%);
+    box-shadow: 0 3px 8px rgb(0 0 0 / 32%);
+    color: #666;
+  }
+
+  .touch-mobility .touch-button:active,
+  .touch-mobility .touch-button.is-pressed {
+    background: #fff;
+    transform: scale(0.94);
+  }
+
+  .touch-mobility svg {
+    width: 52%;
+    height: 52%;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: square;
+    stroke-linejoin: miter;
+    stroke-width: 3.5;
+  }
+
+  .touch-mobility > span {
+    white-space: nowrap;
   }
 }
 
-@media (pointer: coarse) and (orientation: landscape), (max-height: 480px) {
-  .touch-controls {
-    display: block;
+@media (max-height: 500px) and (pointer: coarse) {
+  .touch-dpad {
+    --dpad-cell: clamp(34px, 10vh, 46px);
+    bottom: max(10px, env(safe-area-inset-bottom));
   }
 
-  .touch-controls .touch-group {
-    pointer-events: auto;
+  .touch-view {
+    top: max(4px, env(safe-area-inset-top));
   }
 
-  .touch-movement {
-    grid-template: repeat(2, 42px) / repeat(2, 42px);
+  .touch-view svg {
+    width: 44px;
   }
 
-  .touch-movement .touch-button {
-    width: 42px;
-    height: 42px;
+  .touch-weapon {
+    top: 74px;
   }
 
-  .touch-core {
-    width: min(40vw, 260px);
+  .touch-weapon button {
+    width: 48px;
+    height: 48px;
   }
 
-  .touch-core .touch-button {
-    min-height: 40px;
+  .touch-attack {
+    top: 140px;
+    right: calc(max(16px, env(safe-area-inset-right)) + 68px);
+    width: 62px;
+    height: 62px;
   }
 
-  .touch-toolbar {
-    right: 26%;
-    bottom: calc(146px + env(safe-area-inset-bottom));
-    left: 26%;
-    height: 22dvh;
-    max-height: 22dvh;
+  .touch-mobility {
+    bottom: max(10px, env(safe-area-inset-bottom));
+    grid-template-columns: 46px auto;
+    grid-template-rows: repeat(2, 46px);
+    gap: 6px;
+  }
+
+  .mobile-health-row {
+    transform: scale(0.82);
+    transform-origin: top left;
+  }
+
+  .mobile-health-label {
+    margin-top: -6px;
+    margin-left: 24px;
   }
 }
 

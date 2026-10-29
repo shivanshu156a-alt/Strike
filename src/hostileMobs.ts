@@ -50,7 +50,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     name: 'Normal Melee Attacker',
     movement: 'approaches-player',
     movementSpeed: { type: 'fixed', blocksPerSecond: 4.3 },
-    dimensions: { length: 0.46, width: 0.87, height: 1.74 },
+    dimensions: { length: 0.55, width: 1.04, height: 1.74 },
     attack: 'hand-to-hand',
     attackRange: 'close',
     healthPoints: 100,
@@ -66,7 +66,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     name: 'Shooter',
     movement: 'roams-and-holds-range',
     movementSpeed: { type: 'fixed', blocksPerSecond: 3 },
-    dimensions: { length: 0.46, width: 0.87, height: 1.9 },
+    dimensions: { length: 0.55, width: 1.04, height: 1.9 },
     attack: 'projectile',
     attackRange: 'long',
     healthPoints: 75,
@@ -91,7 +91,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     name: 'Annoying Mob',
     movement: 'approaches-player',
     movementSpeed: { type: 'fixed', blocksPerSecond: 5 },
-    dimensions: { length: 0.3, width: 0.7, height: 0.99 },
+    dimensions: { length: 0.36, width: 0.84, height: 0.99 },
     size: 'small',
     attack: 'hand-to-hand',
     attackRange: 'close',
@@ -110,7 +110,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     name: 'Flying Attacker',
     movement: 'flies-and-approaches',
     movementSpeed: { type: 'variable', maximumBlocksPerSecondExclusive: 18 },
-    dimensions: { length: 1.3, width: 0.67, height: 0.4 },
+    dimensions: { length: 1.56, width: 0.8, height: 0.4 },
     attack: 'stinging',
     attackRange: 'close',
     healthPoints: 60,
@@ -129,7 +129,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     name: 'Teleporting Ghost',
     movement: 'roams-and-teleports',
     movementSpeed: { type: 'variable', maximumBlocksPerSecondExclusive: 14 },
-    dimensions: { length: 0.6, width: 0.99, height: 3.4 },
+    dimensions: { length: 0.72, width: 1.19, height: 3.4 },
     attack: 'hand-to-hand',
     attackRange: 'close',
     healthPoints: 130,
@@ -163,6 +163,7 @@ interface HostileProjectile {
 }
 
 type FlyingAttackerState = 'roaming' | 'diving' | 'ground-roaming' | 'rising';
+type HostileMobAnimation = 'idle' | 'walking' | 'running' | 'attack' | 'defeated';
 
 const MOB_COLORS: Record<string, number> = {
   'normal-melee-attacker': 0xd95745,
@@ -181,6 +182,7 @@ export class HostileMob {
   readonly definition: HostileMobDefinition;
   readonly mesh: THREE.Mesh;
   readonly position = new THREE.Vector3();
+  visualModel: THREE.Object3D | undefined;
 
   private readonly scene: THREE.Scene;
   private readonly projectiles: HostileProjectile[] = [];
@@ -197,7 +199,12 @@ export class HostileMob {
   private readonly knockbackVelocity = new THREE.Vector3();
   private readonly knockbackDirection = new THREE.Vector3();
   private readonly attackDirection = new THREE.Vector3();
+  private readonly previousPosition = new THREE.Vector3();
+  private readonly animationActions = new Map<HostileMobAnimation, THREE.AnimationAction>();
   private currentHealth: number;
+  private animationMixer: THREE.AnimationMixer | undefined;
+  private activeAnimation: THREE.AnimationAction | undefined;
+  private attackAnimationRemaining = 0;
   private attackCooldown = Math.random() * 0.8;
   private attackWindupRemaining = 0;
   private fireCooldown = 1 + Math.random() * 1.5;
@@ -236,15 +243,85 @@ export class HostileMob {
       color: MOB_COLORS[definition.id] ?? 0xd7d7d7,
       roughness: 0.72,
       metalness: 0.05,
+      transparent: true,
+      opacity: 0,
+      colorWrite: false,
+      depthWrite: false,
     });
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.position.copy(this.position);
-    this.mesh.castShadow = true;
-    this.mesh.receiveShadow = true;
     this.scene.add(this.mesh);
     this.mesh.updateMatrixWorld(true);
     this.chooseRoamTarget();
     this.emitHealth();
+  }
+
+  setVisualModel(model: THREE.Object3D): void {
+    if (this.disposed) return;
+
+    model.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(model);
+    const size = bounds.getSize(new THREE.Vector3());
+    const center = bounds.getCenter(new THREE.Vector3());
+    if (
+      !Number.isFinite(size.x)
+      || !Number.isFinite(size.y)
+      || !Number.isFinite(size.z)
+      || size.x <= 0
+      || size.y <= 0
+      || size.z <= 0
+    ) {
+      throw new Error(`Hostile mob model "${this.definition.name}" has invalid bounds.`);
+    }
+
+    const normalizedModel = new THREE.Group();
+    normalizedModel.scale.set(
+      this.definition.dimensions.width / size.x,
+      this.definition.dimensions.height / size.y,
+      this.definition.dimensions.length / size.z,
+    );
+    normalizedModel.position.set(
+      -center.x * normalizedModel.scale.x,
+      -center.y * normalizedModel.scale.y,
+      -center.z * normalizedModel.scale.z,
+    );
+    normalizedModel.add(model);
+    normalizedModel.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      object.castShadow = true;
+      object.receiveShadow = true;
+    });
+    this.mesh.add(normalizedModel);
+    this.visualModel = model;
+    this.mesh.updateMatrixWorld(true);
+  }
+
+  setAnimationClips(clips: Partial<Record<HostileMobAnimation, THREE.AnimationClip>>): void {
+    if (this.disposed || !this.visualModel || this.animationMixer) return;
+
+    this.animationMixer = new THREE.AnimationMixer(this.visualModel);
+    for (const [state, clip] of Object.entries(clips) as [HostileMobAnimation, THREE.AnimationClip][]) {
+      const action = this.animationMixer.clipAction(clip);
+      if (state === 'attack' || state === 'defeated') {
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = state === 'defeated';
+      } else {
+        action.setLoop(THREE.LoopRepeat, Infinity);
+      }
+      this.animationActions.set(state, action);
+    }
+    this.setAnimation(this.isDefeated ? 'defeated' : 'idle');
+  }
+
+  showCollisionProxy(): void {
+    const materials = Array.isArray(this.mesh.material) ? this.mesh.material : [this.mesh.material];
+    materials.forEach((material) => {
+      material.transparent = false;
+      material.opacity = 1;
+      material.colorWrite = true;
+      material.depthWrite = true;
+      material.needsUpdate = true;
+    });
   }
 
   get health(): number {
@@ -274,6 +351,7 @@ export class HostileMob {
     if (this.definition.id === 'teleporting-ghost') this.registerGhostHit();
     this.emitHealth();
     if (this.isDefeated) {
+      this.setAnimation('defeated');
       if (knockbackDirection) this.defeatKnockbackRemaining = 0.22;
       else this.removeFromScene();
     }
@@ -282,9 +360,12 @@ export class HostileMob {
   update(delta: number, playerPosition: THREE.Vector3, playerYaw = 0): void {
     if (this.disposed) return;
     if (this.isDefeated) {
+      this.previousPosition.copy(this.position);
       this.updateDefeatKnockback(delta);
+      this.updateAnimation(delta, this.previousPosition);
       return;
     }
+    this.previousPosition.copy(this.position);
     this.elapsed += delta;
     this.attackCooldown = Math.max(0, this.attackCooldown - delta);
     this.fireCooldown = Math.max(0, this.fireCooldown - delta);
@@ -310,6 +391,7 @@ export class HostileMob {
 
     this.updateProjectiles(delta, playerPosition);
     this.applyKnockback(delta);
+    this.updateAnimation(delta, this.previousPosition);
   }
 
   resolveCollisionWithPlayer(
@@ -406,6 +488,44 @@ export class HostileMob {
     this.mesh.updateMatrixWorld(true);
   }
 
+  private playAttackAnimation(): void {
+    this.attackAnimationRemaining = 0.65;
+    this.setAnimation('attack');
+  }
+
+  private updateAnimation(delta: number, previousPosition: THREE.Vector3): void {
+    if (!this.animationMixer) return;
+    if (this.isDefeated) {
+      this.setAnimation('defeated');
+    } else {
+      this.attackAnimationRemaining = Math.max(0, this.attackAnimationRemaining - delta);
+      if (this.attackAnimationRemaining > 0) {
+        this.setAnimation('attack');
+      } else if (this.position.distanceToSquared(previousPosition) > 0.0001) {
+        const maximumSpeed = this.definition.movementSpeed.type === 'fixed'
+          ? this.definition.movementSpeed.blocksPerSecond
+          : this.definition.movementSpeed.maximumBlocksPerSecondExclusive;
+        this.setAnimation(maximumSpeed > 4 ? 'running' : 'walking');
+      } else {
+        this.setAnimation('idle');
+      }
+    }
+    this.animationMixer.update(delta);
+  }
+
+  private setAnimation(state: HostileMobAnimation): void {
+    const nextAction = this.animationActions.get(state);
+    if (!nextAction || nextAction === this.activeAnimation) return;
+
+    nextAction.reset().play();
+    if (this.activeAnimation) {
+      this.activeAnimation.crossFadeTo(nextAction, 0.15);
+    } else {
+      nextAction.fadeIn(0.15);
+    }
+    this.activeAnimation = nextAction;
+  }
+
   private updateDefeatKnockback(delta: number): void {
     if (this.defeatKnockbackRemaining <= 0) {
       this.removeFromScene();
@@ -456,6 +576,7 @@ export class HostileMob {
       this.setAttackTelegraph(false);
       if (this.horizontalDistanceTo(playerPosition) > MELEE_ATTACK_RADIUS) return;
       this.attackDirection.copy(playerPosition).sub(this.position).setY(0).normalize();
+      this.playAttackAnimation();
       this.onPlayerDamage(this.definition.damagePerAttack, this.attackDirection);
       this.attackCooldown = this.definition.id === 'annoying-mob' ? 0.8 : 1.1;
       return;
@@ -506,6 +627,7 @@ export class HostileMob {
 
     this.face(playerPosition);
     if (this.fireCooldown === 0) {
+      this.playAttackAnimation();
       this.fireAt(playerPosition, this.definition.attackAccuracyPercent ?? 70);
       this.fireCooldown = 1.6 + Math.random() * 0.5;
     }
@@ -539,6 +661,7 @@ export class HostileMob {
       this.moveToward(delta, target, 9);
       if (this.position.distanceTo(target) <= MELEE_ATTACK_RADIUS) {
         this.attackDirection.copy(playerPosition).sub(this.position).normalize();
+        this.playAttackAnimation();
         this.onPlayerDamage(this.definition.damagePerAttack, this.attackDirection);
         this.state = 'ground-roaming';
         this.roamTimer = 2 + Math.random() * 1.2;
@@ -596,6 +719,7 @@ export class HostileMob {
     this.face(playerPosition);
     if (this.attackCooldown === 0) {
       this.attackDirection.copy(playerPosition).sub(this.position).setY(0).normalize();
+      this.playAttackAnimation();
       this.onPlayerDamage(this.definition.damagePerAttack, this.attackDirection);
       this.attackCooldown = 1.6;
       this.attemptGhostTeleport(playerPosition);
@@ -727,12 +851,15 @@ export class HostileMob {
   }
 
   private setAttackTelegraph(active: boolean): void {
-    const materials = Array.isArray(this.mesh.material) ? this.mesh.material : [this.mesh.material];
-    for (const material of materials) {
-      if (!(material instanceof THREE.MeshStandardMaterial)) continue;
-      material.emissive.setHex(active ? 0xff4b24 : 0x000000);
-      material.emissiveIntensity = active ? 0.8 : 0;
-    }
+    this.mesh.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (!(material instanceof THREE.MeshStandardMaterial)) continue;
+        material.emissive.setHex(active ? 0xff4b24 : 0x000000);
+        material.emissiveIntensity = active ? 0.8 : 0;
+      }
+    });
   }
 
   private attemptGhostTeleport(playerPosition: THREE.Vector3): void {
@@ -839,10 +966,19 @@ export class HostileMob {
     if (this.disposed) return;
     this.disposed = true;
     this.scene.remove(this.mesh);
-    this.mesh.geometry.dispose();
-    const material = this.mesh.material;
-    if (Array.isArray(material)) material.forEach((item) => item.dispose());
-    else material.dispose();
+    this.animationMixer?.stopAllAction();
+    if (this.visualModel) this.animationMixer?.uncacheRoot(this.visualModel);
+    this.mesh.traverse((object) => {
+      if (!(object instanceof THREE.Mesh || object instanceof THREE.Line)) return;
+      object.geometry.dispose();
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      materials.forEach((material) => {
+        Object.values(material).forEach((value) => {
+          if (value instanceof THREE.Texture) value.dispose();
+        });
+        material.dispose();
+      });
+    });
     for (let index = this.projectiles.length - 1; index >= 0; index -= 1) {
       this.removeProjectile(index);
     }
