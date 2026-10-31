@@ -3,6 +3,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { ARENA_GRID_SIZE, GRID_UNIT_SIZE, buildMap, type ArenaMap } from './maps';
 import { HOSTILE_MOBS, HostileMob, type HostileMobHealth } from './hostileMobs';
 import {
@@ -42,6 +43,7 @@ const PUNCH_ANIMATION_SPEED = 2.5;
 const TOUCH_LOOK_SENSITIVITY_MULTIPLIER = 3;
 const TOUCH_DOUBLE_TAP_INTERVAL = 320;
 const WORLD_AIM_POINT_DISTANCE = 8;
+const ASSET_LOAD_TIMEOUT_MS = 30_000;
 const PLAYER_CHARACTER_URL = new URL('../3D/character.glb', import.meta.url).href;
 const HOSTILE_MOB_MODEL_URLS: Partial<Record<string, string>> = {
   'normal-melee-attacker': new URL('../3D/Normal Melee Attacker.glb', import.meta.url).href,
@@ -105,6 +107,65 @@ interface PlayerProjectile {
   remainingRange: number;
   speed: number;
   damage: number;
+}
+
+type GltfAsset = Awaited<ReturnType<GLTFLoader['loadAsync']>>;
+
+const gltfAssetCache = new Map<string, Promise<GltfAsset>>();
+const fbxAssetCache = new Map<string, Promise<THREE.Group>>();
+
+function loadCachedAsset<T>(
+  cache: Map<string, Promise<T>>,
+  url: string,
+  load: () => Promise<T>,
+): Promise<T> {
+  const cachedAsset = cache.get(url);
+  if (cachedAsset) return cachedAsset;
+
+  let timeoutId: number | undefined;
+  const assetPromise = Promise.race([
+    load(),
+    new Promise<T>((_, reject) => {
+      timeoutId = window.setTimeout(
+        () => reject(new Error(`Loading "${url}" timed out.`)),
+        ASSET_LOAD_TIMEOUT_MS,
+      );
+    }),
+  ]).finally(() => {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+  });
+  cache.set(url, assetPromise);
+  void assetPromise.catch(() => {
+    if (cache.get(url) === assetPromise) cache.delete(url);
+  });
+  return assetPromise;
+}
+
+function cloneModelForGame(source: THREE.Group): THREE.Group {
+  const model = SkeletonUtils.clone(source) as THREE.Group;
+  const clonedTextures = new Map<THREE.Texture, THREE.Texture>();
+  model.traverse((object) => {
+    if (!(object instanceof THREE.Mesh || object instanceof THREE.Line)) return;
+    object.geometry = object.geometry.clone();
+    const cloneMaterial = (sourceMaterial: THREE.Material): THREE.Material => {
+      const material = sourceMaterial.clone();
+      const properties = material as THREE.Material & Record<string, unknown>;
+      Object.entries(properties).forEach(([key, value]) => {
+        if (!(value instanceof THREE.Texture)) return;
+        let texture = clonedTextures.get(value);
+        if (!texture) {
+          texture = value.clone();
+          clonedTextures.set(value, texture);
+        }
+        properties[key] = texture;
+      });
+      return material;
+    };
+    object.material = Array.isArray(object.material)
+      ? object.material.map(cloneMaterial)
+      : cloneMaterial(object.material);
+  });
+  return model;
 }
 
 function disposeObjectResources(root: THREE.Object3D): void {
@@ -202,6 +263,8 @@ export interface GameActionDetail {
 export type CameraView = 'first-person' | 'floating';
 
 export class Game {
+  readonly ready: Promise<void>;
+
   readonly renderer: THREE.WebGLRenderer;
   readonly camera: THREE.PerspectiveCamera;
   readonly player = new Player();
@@ -298,6 +361,7 @@ export class Game {
     map: ArenaMap,
     lookSensitivity = 1,
     private readonly mobsEnabled = true,
+    onLoadingProgress: (progress: number) => void = () => {},
   ) {
     this.lookSensitivity = lookSensitivity;
     this.canvas = document.createElement('canvas');
@@ -339,25 +403,89 @@ export class Game {
 
     buildMap(this.scene, map);
     if (this.mobsEnabled) this.spawnHostileMobs();
-    if (this.mobsEnabled) void this.loadHostileMobModels();
     this.attachEvents();
     this.updateCamera(0);
-    void this.loadPlayerCharacter();
-    this.animate();
+    this.ready = this.initializeAssets(onLoadingProgress);
   }
 
-  private async loadPlayerCharacter(): Promise<void> {
+  private async initializeAssets(onLoadingProgress: (progress: number) => void): Promise<void> {
+    const totalAssets = 1
+      + Object.keys(PLAYER_ANIMATION_URLS).length
+      + (this.mobsEnabled ? Object.keys(HOSTILE_MOB_MODEL_URLS).length : 0);
+    let loadedAssets = 0;
+    const onAssetLoaded = (): void => {
+      loadedAssets += 1;
+      onLoadingProgress(loadedAssets / (totalAssets + 1));
+    };
+
+    await Promise.all([
+      this.loadPlayerCharacter(onAssetLoaded),
+      this.mobsEnabled ? this.loadHostileMobModels(onAssetLoaded) : Promise.resolve(),
+    ]);
+    this.attachHostileMobAnimations();
+
+    await this.renderer.compileAsync(this.scene, this.camera);
+    await new Promise<void>((resolve, reject) => {
+      requestAnimationFrame(() => {
+        try {
+          this.renderer.render(this.scene, this.camera);
+          onLoadingProgress(1);
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    if (this.disposed) return;
+    this.animationFrame = requestAnimationFrame(this.animate);
+  }
+
+  private async loadPlayerCharacter(onAssetLoaded: () => void): Promise<void> {
     const characterLoader = new GLTFLoader();
     characterLoader.setMeshoptDecoder(MeshoptDecoder);
-    const animationLoader = new FBXLoader();
+    const animationManager = new THREE.LoadingManager();
+    let resolveAnimationResources: (() => void) | undefined;
+    const animationResourcesLoaded = new Promise<void>((resolve) => {
+      resolveAnimationResources = resolve;
+    });
+    const animationLoadErrors: string[] = [];
+    animationManager.onLoad = () => resolveAnimationResources?.();
+    animationManager.onError = (url) => animationLoadErrors.push(url);
+    const animationLoader = new FBXLoader(animationManager);
     let loadedCharacter: THREE.Group | undefined;
     let normalizedModel: THREE.Group | undefined;
     let loadedMixer: THREE.AnimationMixer | undefined;
     let characterMounted = false;
     try {
       const animationEntries = Object.entries(PLAYER_ANIMATION_URLS) as [PlayerAnimation, string][];
-      const characterAsset = await characterLoader.loadAsync(PLAYER_CHARACTER_URL);
-      const character = characterAsset.scene;
+      const characterPromise = loadCachedAsset(
+        gltfAssetCache,
+        PLAYER_CHARACTER_URL,
+        () => characterLoader.loadAsync(PLAYER_CHARACTER_URL),
+      ).then((asset) => {
+        onAssetLoaded();
+        return asset;
+      });
+      const animationPromises = animationEntries.map(([, url]) => loadCachedAsset(
+        fbxAssetCache,
+        url,
+        async () => {
+          const animation = await animationLoader.loadAsync(url);
+          await animationResourcesLoaded;
+          if (animationLoadErrors.length > 0) {
+            throw new Error(`Animation texture loading failed: ${animationLoadErrors.join(', ')}`);
+          }
+          return animation;
+        },
+      ).then((asset) => {
+        onAssetLoaded();
+        return asset;
+      }));
+      const [characterAsset, loadedAnimationAssets] = await Promise.all([
+        characterPromise,
+        Promise.all(animationPromises),
+      ]);
+      const character = cloneModelForGame(characterAsset.scene);
       loadedCharacter = character;
       if (this.disposed) {
         disposeObjectResources(character);
@@ -407,77 +535,66 @@ export class Game {
       loadedCharacter = undefined;
       loadedMixer = undefined;
 
-      const animationResults = await Promise.allSettled(
-        animationEntries.map(([, url]) => animationLoader.loadAsync(url)),
-      );
       if (this.disposed) return;
 
       const sharedMobAnimations = new Set<PlayerAnimation>(Object.values(HOSTILE_MOB_ANIMATIONS));
       const loadedClips = new Map<PlayerAnimation, THREE.AnimationClip>();
       animationEntries.forEach(([animation, url], index) => {
-        const result = animationResults[index];
-        if (result.status === 'rejected') {
-          console.warn(`Unable to load optional player animation "${url}".`, result.reason);
-          return;
-        }
-        const clip = result.value.animations.find((candidate) => candidate.tracks.length > 0);
+        const clip = loadedAnimationAssets[index].animations.find((candidate) => candidate.tracks.length > 0);
         if (!clip) {
-          console.warn(`Animation file "${url}" contains no usable animation clip.`);
-          return;
+          throw new Error(`Animation file "${url}" contains no usable animation clip.`);
         }
         loadedClips.set(animation, clip);
         if (sharedMobAnimations.has(animation)) this.sharedPlayerAnimationClips.set(animation, clip);
       });
-      this.attachHostileMobAnimations();
 
       const animationActions = new Map<PlayerAnimation, THREE.AnimationAction>();
       animationEntries.forEach(([animation, url]) => {
         const clip = loadedClips.get(animation);
-        if (!clip) return;
-        try {
-          const preserveRootRotation = ![
-            'strafeLeft',
-            'strafeRight',
-            'walkStrafeLeft',
-            'walkStrafeRight',
-            'turnLeft',
-            'turnRight',
-            'turnLeft90',
-            'turnRight90',
-          ].includes(animation);
-          const retargetedClip = retargetClipToCharacter(
-            clip,
-            skinnedMeshes,
-            preserveRootRotation,
-            animation === 'death',
-          );
-          const action = mixer.clipAction(retargetedClip);
-          if (
-            animation === 'jump'
-            || animation === 'crouchDown'
-            || animation === 'crouchUp'
-            || animation === 'punch'
-            || animation === 'death'
-            || animation.startsWith('turn')
-          ) {
-            action.setLoop(THREE.LoopOnce, 1);
-            action.clampWhenFinished = true;
-          } else {
-            action.setLoop(THREE.LoopRepeat, Infinity);
-          }
-          if (animation === 'crouchDown' || animation === 'crouchUp') {
-            action.timeScale = CROUCH_TRANSITION_SPEED;
-          } else if (animation === 'punch') {
-            action.timeScale = PUNCH_ANIMATION_SPEED;
-          }
-          animationActions.set(animation, action);
-        } catch (error) {
-          console.warn(`Unable to retarget optional player animation "${url}".`, error);
+        if (!clip) throw new Error(`Required player animation "${url}" was not loaded.`);
+        const preserveRootRotation = ![
+          'strafeLeft',
+          'strafeRight',
+          'walkStrafeLeft',
+          'walkStrafeRight',
+          'turnLeft',
+          'turnRight',
+          'turnLeft90',
+          'turnRight90',
+        ].includes(animation);
+        const retargetedClip = retargetClipToCharacter(
+          clip,
+          skinnedMeshes,
+          preserveRootRotation,
+          animation === 'death',
+        );
+        if (retargetedClip.tracks.length === 0) {
+          throw new Error(`Player animation "${url}" has no tracks compatible with the character.`);
         }
+        const action = mixer.clipAction(retargetedClip);
+        if (
+          animation === 'jump'
+          || animation === 'crouchDown'
+          || animation === 'crouchUp'
+          || animation === 'punch'
+          || animation === 'death'
+          || animation.startsWith('turn')
+        ) {
+          action.setLoop(THREE.LoopOnce, 1);
+          action.clampWhenFinished = true;
+        } else {
+          action.setLoop(THREE.LoopRepeat, Infinity);
+        }
+        if (animation === 'crouchDown' || animation === 'crouchUp') {
+          action.timeScale = CROUCH_TRANSITION_SPEED;
+        } else if (animation === 'punch') {
+          action.timeScale = PUNCH_ANIMATION_SPEED;
+        }
+        animationActions.set(animation, action);
       });
 
       if (animationActions.size === 0) {
-        console.warn('Player character loaded without any usable animation actions.');
+        throw new Error('Player character loaded without usable animation actions.');
       }
 
       animationActions.forEach((action, animation) => {
@@ -489,6 +606,7 @@ export class Game {
           ? this.locomotionAnimationState
           : this.playerAnimationState;
       this.setPlayerAnimation(initialAnimation);
+      mixer.update(0);
       console.info(
         `Loaded character.glb with ${characterBones.size} bones and ${this.playerAnimationActions.size} player animations.`,
       );
@@ -499,11 +617,11 @@ export class Game {
         if (loadedCharacter && loadedMixer) loadedMixer.uncacheRoot(loadedCharacter);
         if (loadedCharacter) disposeObjectResources(loadedCharacter);
       }
-      console.error(
+      throw new Error(
         characterMounted
-          ? 'Player character loaded, but its animations could not be loaded.'
-          : 'Unable to load the Mixamo player character.',
-        error,
+          ? 'Player character loaded, but its animations could not be initialized.'
+          : 'Unable to load or initialize the Mixamo player character.',
+        { cause: error },
       );
     }
   }
@@ -744,52 +862,51 @@ export class Game {
     });
   }
 
-  private async loadHostileMobModels(): Promise<void> {
+  private async loadHostileMobModels(onAssetLoaded: () => void): Promise<void> {
     const dracoLoader = new DRACOLoader();
     dracoLoader.setDecoderPath(new URL('./', document.baseURI).href);
     const loader = new GLTFLoader();
     loader.setMeshoptDecoder(MeshoptDecoder);
     loader.setDRACOLoader(dracoLoader);
-    await Promise.all(Object.entries(HOSTILE_MOB_MODEL_URLS).map(async ([id, url]) => {
-      if (!url) return;
-      let loadedScene: THREE.Group | undefined;
-      try {
-        const asset = await loader.loadAsync(url);
-        loadedScene = asset.scene;
-        if (this.disposed) {
-          disposeObjectResources(loadedScene);
-          loadedScene = undefined;
-          return;
-        }
-        const mob = this.hostileMobs.find((candidate) => candidate.definition.id === id);
-        if (!mob || mob.isDefeated) {
-          disposeObjectResources(loadedScene);
-          loadedScene = undefined;
-          if (!mob) throw new Error(`No spawned hostile mob matches model "${id}".`);
-          return;
-        }
-        mob.setVisualModel(loadedScene);
-        this.attachHostileMobAnimations();
-        loadedScene = undefined;
-      } catch (error) {
-        if (loadedScene) disposeObjectResources(loadedScene);
-        this.hostileMobs
-          .find((candidate) => candidate.definition.id === id)
-          ?.showCollisionProxy();
-        console.error(`Unable to load the ${id} hostile mob model.`, error);
-      }
+    const models = await Promise.all(Object.entries(HOSTILE_MOB_MODEL_URLS).map(async ([id, url]) => {
+      if (!url) return undefined;
+      const asset = await loadCachedAsset(
+        gltfAssetCache,
+        url,
+        () => loader.loadAsync(url),
+      );
+      onAssetLoaded();
+      return { id, scene: cloneModelForGame(asset.scene) };
     }));
+
+    if (this.disposed) {
+      models.forEach((model) => {
+        if (model) disposeObjectResources(model.scene);
+      });
+      return;
+    }
+
+    models.forEach((model) => {
+      if (!model) return;
+      const mob = this.hostileMobs.find((candidate) => candidate.definition.id === model.id);
+      if (!mob) {
+        disposeObjectResources(model.scene);
+        throw new Error(`No spawned hostile mob matches model "${model.id}".`);
+      }
+      mob.setVisualModel(model.scene);
+    });
   }
 
   private attachHostileMobAnimations(): void {
-    if (this.sharedPlayerAnimationClips.size === 0) return;
-
     for (const mob of this.hostileMobs) {
+      if (!mob.visualModel) continue;
       const skinnedMeshes: THREE.SkinnedMesh[] = [];
-      mob.visualModel?.traverse((object) => {
+      mob.visualModel.traverse((object) => {
         if (object instanceof THREE.SkinnedMesh) skinnedMeshes.push(object);
       });
-      if (skinnedMeshes.length === 0) continue;
+      if (skinnedMeshes.length === 0) {
+        throw new Error(`Hostile mob model "${mob.definition.name}" has no animated skeleton.`);
+      }
 
       const clips: Partial<Record<keyof typeof HOSTILE_MOB_ANIMATIONS, THREE.AnimationClip>> = {};
       for (const [state, animation] of Object.entries(HOSTILE_MOB_ANIMATIONS) as [
@@ -797,18 +914,20 @@ export class Game {
         PlayerAnimation,
       ][]) {
         const sourceClip = this.sharedPlayerAnimationClips.get(animation);
-        if (!sourceClip) continue;
-        try {
-          clips[state] = retargetClipToCharacter(
-            sourceClip,
-            skinnedMeshes,
-            true,
-            false,
-            false,
-          );
-        } catch (error) {
-          console.warn(`Unable to retarget the ${animation} animation to ${mob.definition.name}.`, error);
+        if (!sourceClip) {
+          throw new Error(`Required ${animation} animation for ${mob.definition.name} was not loaded.`);
         }
+        const clip = retargetClipToCharacter(
+          sourceClip,
+          skinnedMeshes,
+          true,
+          false,
+          false,
+        );
+        if (clip.tracks.length === 0) {
+          throw new Error(`The ${animation} animation has no tracks compatible with ${mob.definition.name}.`);
+        }
+        clips[state] = clip;
       }
       mob.setAnimationClips(clips);
     }

@@ -169,6 +169,91 @@ input {
   touch-action: none;
 }
 
+.game-loading {
+  position: absolute;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(ellipse at center, rgb(20 37 53 / 88%), rgb(5 11 18 / 97%)),
+    #08111a;
+  inset: 0;
+  color: #f4eee3;
+  font-family: Arial, sans-serif;
+}
+
+.game-loading-card {
+  width: min(440px, 100%);
+  padding: 32px;
+  border: 1px solid rgb(136 194 220 / 48%);
+  border-radius: 12px;
+  background: rgb(10 18 28 / 82%);
+  box-shadow: 0 12px 48px rgb(0 0 0 / 45%);
+  text-align: center;
+}
+
+.game-loading-title {
+  margin: 0;
+  font: 600 clamp(22px, 5vw, 30px)/1.2 Georgia, 'Times New Roman', serif;
+}
+
+.game-loading-message {
+  margin: 20px 0 14px;
+  color: #c1d9e8;
+  font-size: 14px;
+}
+
+.game-loading-track {
+  height: 12px;
+  overflow: hidden;
+  border: 1px solid rgb(136 194 220 / 55%);
+  border-radius: 999px;
+  background: rgb(0 0 0 / 42%);
+}
+
+.game-loading-fill {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #1784c6, #72dcff);
+  box-shadow: 0 0 16px rgb(76 195 255 / 65%);
+  transition: width 180ms ease-out;
+}
+
+.game-loading-percent {
+  margin: 9px 0 0;
+  color: #a5e7ff;
+  font: 600 13px/1 Arial, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.game-loading-error {
+  margin-top: 20px;
+  color: #ffd2cb;
+  font-size: 14px;
+}
+
+.game-loading-error p {
+  margin: 0 0 16px;
+}
+
+.game-loading-error button {
+  margin: 4px;
+  padding: 9px 16px;
+  border: 1px solid rgb(165 231 255 / 72%);
+  border-radius: 5px;
+  background: #19374b;
+  color: #f4eee3;
+  cursor: pointer;
+}
+
+.game-loading-error button:hover,
+.game-loading-error button:focus-visible {
+  background: #245676;
+  outline: 2px solid #a5e7ff;
+}
+
 .game-hud {
   position: absolute;
   top: 16px;

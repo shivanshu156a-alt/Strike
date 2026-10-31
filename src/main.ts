@@ -20,7 +20,30 @@ app.innerHTML = `
         <span>Disable mobs (test)</span>
       </label>
     </section>
-    <section id="game-view" aria-label="Game view" hidden></section>
+    <section id="game-view" aria-label="Game view" hidden>
+      <div class="game-loading" role="status" aria-live="polite">
+        <div class="game-loading-card">
+          <h1 class="game-loading-title">Preparing the arena</h1>
+          <p class="game-loading-message">Loading characters and animations…</p>
+          <div
+            class="game-loading-track"
+            role="progressbar"
+            aria-label="Game loading progress"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+          >
+            <div class="game-loading-fill"></div>
+          </div>
+          <p class="game-loading-percent">0%</p>
+          <div class="game-loading-error" role="alert" hidden>
+            <p>Game assets could not be loaded. Check your connection and try again.</p>
+            <button class="loading-retry-button" type="button">Retry</button>
+            <button class="loading-menu-button" type="button">Back to menu</button>
+          </div>
+        </div>
+      </div>
+    </section>
     <dialog class="menu-dialog" id="settings-dialog" aria-labelledby="settings-title">
       <form method="dialog">
         <h1 id="settings-title">Settings</h1>
@@ -63,6 +86,14 @@ app.innerHTML = `
 
 const menu = app.querySelector<HTMLElement>('.main-menu');
 const gameView = app.querySelector<HTMLElement>('#game-view');
+const loadingScreen = gameView?.querySelector<HTMLElement>('.game-loading');
+const loadingMessage = gameView?.querySelector<HTMLElement>('.game-loading-message');
+const loadingProgress = gameView?.querySelector<HTMLElement>('.game-loading-track');
+const loadingFill = gameView?.querySelector<HTMLElement>('.game-loading-fill');
+const loadingPercent = gameView?.querySelector<HTMLElement>('.game-loading-percent');
+const loadingError = gameView?.querySelector<HTMLElement>('.game-loading-error');
+const retryButton = gameView?.querySelector<HTMLButtonElement>('.loading-retry-button');
+const loadingMenuButton = gameView?.querySelector<HTMLButtonElement>('.loading-menu-button');
 const playButton = app.querySelector<HTMLButtonElement>('.menu-play');
 const settingsButton = app.querySelector<HTMLButtonElement>('.menu-settings');
 const howToPlayButton = app.querySelector<HTMLButtonElement>('.menu-how-to-play');
@@ -75,7 +106,9 @@ const sensitivityValue = app.querySelector<HTMLOutputElement>('#sensitivity-valu
 const disableMobsInput = app.querySelector<HTMLInputElement>('#disable-mobs');
 
 if (
-  !menu || !gameView || !playButton || !settingsButton || !howToPlayButton || !quitButton
+  !menu || !gameView || !loadingScreen || !loadingMessage || !loadingProgress || !loadingFill
+  || !loadingPercent || !loadingError || !retryButton || !loadingMenuButton
+  || !playButton || !settingsButton || !howToPlayButton || !quitButton
   || !settingsDialog || !howToPlayDialog || !quitDialog || !sensitivityInput || !sensitivityValue
   || !disableMobsInput
 ) {
@@ -86,18 +119,58 @@ let game: Game | undefined;
 let mouseSensitivity = Number(sensitivityInput.value);
 
 const exitGame = (): void => {
-  if (!game) return;
-  game.destroy();
+  game?.destroy();
   game = undefined;
   gameView.hidden = true;
   menu.hidden = false;
 };
 
-playButton.addEventListener('click', () => {
+const startGame = (): void => {
+  game?.destroy();
+  game = undefined;
+  loadingError.hidden = true;
+  loadingMessage.textContent = 'Loading characters and animations…';
+  loadingProgress.setAttribute('aria-valuenow', '0');
+  loadingFill.style.width = '0%';
+  loadingPercent.textContent = '0%';
+  loadingScreen.hidden = false;
   menu.hidden = true;
   gameView.hidden = false;
-  game = new Game(gameView, EMPTY_ARENA, mouseSensitivity, !disableMobsInput.checked);
-});
+
+  try {
+    const newGame = new Game(
+      gameView,
+      EMPTY_ARENA,
+      mouseSensitivity,
+      !disableMobsInput.checked,
+      (progress) => {
+        const percent = Math.round(progress * 100);
+        loadingProgress.setAttribute('aria-valuenow', String(percent));
+        loadingFill.style.width = `${percent}%`;
+        loadingPercent.textContent = `${percent}%`;
+      },
+    );
+    game = newGame;
+    void newGame.ready.then(() => {
+      if (game === newGame) loadingScreen.hidden = true;
+    }).catch((error: unknown) => {
+      if (game !== newGame) return;
+      console.error('Unable to prepare the game assets.', error);
+      loadingMessage.textContent = 'The game could not be prepared.';
+      loadingError.hidden = false;
+      retryButton.focus();
+    });
+  } catch (error) {
+    console.error('Unable to initialize the game.', error);
+    loadingMessage.textContent = 'The game could not be prepared.';
+    loadingError.hidden = false;
+    retryButton.focus();
+  }
+};
+
+playButton.addEventListener('click', startGame);
+retryButton.addEventListener('click', startGame);
+loadingMenuButton.addEventListener('click', exitGame);
 
 settingsButton.addEventListener('click', () => settingsDialog.showModal());
 howToPlayButton.addEventListener('click', () => howToPlayDialog.showModal());
