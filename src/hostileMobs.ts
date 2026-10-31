@@ -45,12 +45,13 @@ export interface HostileMobDefinition {
 }
 
 export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
+  // The GLB characters use X for left/right width, Y for height, and Z for depth.
   {
     id: 'normal-melee-attacker',
     name: 'Normal Melee Attacker',
     movement: 'approaches-player',
     movementSpeed: { type: 'fixed', blocksPerSecond: 4.3 },
-    dimensions: { length: 0.66, width: 0.66, height: 1.74 },
+    dimensions: { length: 0.66, width: 2.22548, height: 1.74 },
     attack: 'hand-to-hand',
     attackRange: 'close',
     healthPoints: 100,
@@ -66,7 +67,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     name: 'Shooter',
     movement: 'roams-and-holds-range',
     movementSpeed: { type: 'fixed', blocksPerSecond: 3 },
-    dimensions: { length: 0.66, width: 0.66, height: 1.9 },
+    dimensions: { length: 0.66, width: 2.02218, height: 1.9 },
     attack: 'projectile',
     attackRange: 'long',
     healthPoints: 75,
@@ -91,7 +92,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     name: 'Annoying Mob',
     movement: 'approaches-player',
     movementSpeed: { type: 'fixed', blocksPerSecond: 5 },
-    dimensions: { length: 0.432, width: 0.432, height: 0.99 },
+    dimensions: { length: 0.432, width: 0.91095, height: 0.99 },
     size: 'small',
     attack: 'hand-to-hand',
     attackRange: 'close',
@@ -110,7 +111,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     name: 'Flying Attacker',
     movement: 'flies-and-approaches',
     movementSpeed: { type: 'variable', maximumBlocksPerSecondExclusive: 18 },
-    dimensions: { length: 1.872, width: 1.872, height: 0.4 },
+    dimensions: { length: 1.872, width: 2.9952, height: 0.4 },
     attack: 'stinging',
     attackRange: 'close',
     healthPoints: 60,
@@ -129,7 +130,7 @@ export const HOSTILE_MOBS: readonly HostileMobDefinition[] = [
     name: 'Teleporting Ghost',
     movement: 'roams-and-teleports',
     movementSpeed: { type: 'variable', maximumBlocksPerSecondExclusive: 14 },
-    dimensions: { length: 0.864, width: 0.864, height: 3.4 },
+    dimensions: { length: 0.864, width: 2.78715, height: 3.4 },
     attack: 'hand-to-hand',
     attackRange: 'close',
     healthPoints: 130,
