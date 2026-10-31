@@ -253,6 +253,7 @@ export class HostileMob {
     this.mesh.position.copy(this.position);
     this.scene.add(this.mesh);
     this.mesh.updateMatrixWorld(true);
+    if (definition.id === 'flying-attacker') this.showCollisionProxy();
     this.chooseRoamTarget();
     this.emitHealth();
   }
