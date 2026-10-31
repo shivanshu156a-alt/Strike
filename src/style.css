@@ -169,6 +169,21 @@ input {
   touch-action: none;
 }
 
+#game-view.is-damaged::after {
+  position: fixed;
+  z-index: 4;
+  pointer-events: none;
+  content: '';
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 38%, rgb(196 36 48 / 35%) 100%);
+  animation: damage-flash 240ms ease-out both;
+}
+
+@keyframes damage-flash {
+  from { opacity: 0.9; }
+  to { opacity: 0; }
+}
+
 .game-loading {
   position: absolute;
   z-index: 5;
@@ -291,6 +306,14 @@ input {
 .game-crosshair.is-targeted {
   --crosshair-color: #a6ffca;
 }
+
+.game-crosshair.is-hit {
+  --crosshair-color: #ffe08a;
+  filter: drop-shadow(0 0 5px rgb(255 206 92 / 95%));
+}
+
+.game-crosshair.is-hit::before { height: 24px; }
+.game-crosshair.is-hit::after { width: 24px; }
 
 .game-crosshair.is-floating-view {
   visibility: hidden;
@@ -708,6 +731,10 @@ input {
     outline-offset: 3px;
   }
 
+  .touch-button {
+    font-weight: 700;
+  }
+
   .touch-dpad {
     --dpad-cell: clamp(38px, 12vw, 56px);
     position: absolute;
@@ -938,7 +965,8 @@ input {
 
 @media (prefers-reduced-motion: reduce) {
   .death-screen,
-  .death-card {
+  .death-card,
+  #game-view.is-damaged::after {
     animation-duration: 0.01ms;
   }
 }

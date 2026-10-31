@@ -40,7 +40,7 @@ const CAMERA_MODE_TRANSITION_DURATION = 0.2;
 const PLAYER_ANIMATION_FADE_DURATION = 0.2;
 const CROUCH_TRANSITION_SPEED = 2.5;
 const PUNCH_ANIMATION_SPEED = 2.5;
-const TOUCH_LOOK_SENSITIVITY_MULTIPLIER = 3;
+const TOUCH_LOOK_SENSITIVITY_MULTIPLIER = 1.8;
 const TOUCH_DOUBLE_TAP_INTERVAL = 320;
 const WORLD_AIM_POINT_DISTANCE = 8;
 const ASSET_LOAD_TIMEOUT_MS = 30_000;
@@ -300,6 +300,7 @@ export class Game {
     label: HTMLElement;
   }>();
   private readonly hostileMobs: HostileMob[] = [];
+  private readonly targetMeshes: THREE.Mesh[] = [];
   private readonly keys = new Set<string>();
   private readonly touchKeys = new Set<string>();
   private readonly touchSprintKeys = new Set<string>();
@@ -355,6 +356,10 @@ export class Game {
   private mouseAttackHeld = false;
   private mouseFocusHeld = false;
   private nextAttackAt = 0;
+  private targetCheckElapsed = 0;
+  private targetVisible = false;
+  private hitFeedbackTimeout = 0;
+  private damageFlashTimeout = 0;
 
   constructor(
     container: HTMLElement,
@@ -387,6 +392,8 @@ export class Game {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 160);
     this.camera.rotation.order = 'YXZ';
@@ -525,6 +532,11 @@ export class Game {
         center.z * modelScale,
       );
       normalizedModel.add(character);
+      character.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        object.castShadow = true;
+        object.receiveShadow = true;
+      });
 
       const mixer = new THREE.AnimationMixer(character);
       loadedMixer = mixer;
@@ -629,6 +641,9 @@ export class Game {
   destroy(): void {
     this.disposed = true;
     cancelAnimationFrame(this.animationFrame);
+    window.clearTimeout(this.hitFeedbackTimeout);
+    window.clearTimeout(this.damageFlashTimeout);
+    this.canvas.parentElement?.classList.remove('is-damaged');
     this.clearKeys();
     document.removeEventListener('keydown', this.onKeyDown);
     document.removeEventListener('keyup', this.onKeyUp);
@@ -1076,16 +1091,12 @@ export class Game {
     this.raycaster.far = attack.attackRange;
     const direction = this.aimDirection.clone();
     if (attack.mode === 'melee') {
-      const targets = this.hostileMobs
-        .filter((mob) => !mob.isDefeated)
-        .map((mob) => {
-          mob.mesh.updateMatrixWorld(true);
-          return mob.mesh;
-        });
-      const [hit] = this.raycaster.intersectObjects(targets, false);
+      this.refreshTargetMeshes();
+      const [hit] = this.raycaster.intersectObjects(this.targetMeshes, false);
       if (hit) {
         this.hostileMobs.find((mob) => mob.mesh === hit.object)
           ?.takeDamage(attack.attackDamage, direction);
+        this.showHitFeedback();
       }
       return;
     }
@@ -1107,6 +1118,7 @@ export class Game {
   }
 
   private updatePlayerProjectiles(delta: number): void {
+    this.refreshTargetMeshes();
     for (let index = this.playerProjectiles.length - 1; index >= 0; index -= 1) {
       const projectile = this.playerProjectiles[index];
       const step = Math.min(
@@ -1115,16 +1127,11 @@ export class Game {
       );
       this.raycaster.set(projectile.mesh.position, projectile.direction);
       this.raycaster.far = step + 0.12;
-      const targets = this.hostileMobs
-        .filter((mob) => !mob.isDefeated)
-        .map((mob) => {
-          mob.mesh.updateMatrixWorld(true);
-          return mob.mesh;
-        });
-      const [hit] = this.raycaster.intersectObjects(targets, false);
+      const [hit] = this.raycaster.intersectObjects(this.targetMeshes, false);
       if (hit) {
         this.hostileMobs.find((mob) => mob.mesh === hit.object)
           ?.takeDamage(projectile.damage, projectile.direction);
+        this.showHitFeedback();
         this.removePlayerProjectile(index);
         continue;
       }
@@ -1135,29 +1142,46 @@ export class Game {
     }
   }
 
-  private updateCrosshairTarget(): void {
+  private updateCrosshairTarget(delta: number): void {
     if (this.gameOver) {
       this.crosshair.classList.remove('is-targeted');
       this.worldAimMarker.visible = false;
       return;
     }
 
-    this.updateAimRay();
-    this.raycaster.far = this.player.selectedAttack.attackRange;
-    const targets = this.hostileMobs
-      .filter((mob) => !mob.isDefeated)
-      .map((mob) => {
-        mob.mesh.updateMatrixWorld(true);
-        return mob.mesh;
-      });
-    const hasTarget = this.raycaster.intersectObjects(targets, false).length > 0;
-    this.crosshair.classList.toggle('is-targeted', hasTarget);
+    this.targetCheckElapsed -= delta;
+    if (this.targetCheckElapsed <= 0) {
+      this.targetCheckElapsed = 0.06;
+      this.updateAimRay();
+      this.refreshTargetMeshes();
+      this.raycaster.far = this.player.selectedAttack.attackRange;
+      this.targetVisible = this.raycaster.intersectObjects(this.targetMeshes, false).length > 0;
+    }
+    this.crosshair.classList.toggle('is-targeted', this.targetVisible);
     this.crosshair.classList.toggle('is-floating-view', this.cameraView === 'floating');
     this.worldAimMarker.visible = this.cameraView === 'floating';
     if (this.worldAimMarker.visible) {
       this.worldAimMarker.position.copy(this.aimPoint);
-      this.worldAimMarkerMaterial.color.set(hasTarget ? 0xa6ffca : 0xffffff);
+      this.worldAimMarkerMaterial.color.set(this.targetVisible ? 0xa6ffca : 0xffffff);
     }
+  }
+
+  private refreshTargetMeshes(): void {
+    this.targetMeshes.length = 0;
+    for (const mob of this.hostileMobs) {
+      if (mob.isDefeated) continue;
+      mob.mesh.updateMatrixWorld(true);
+      this.targetMeshes.push(mob.mesh);
+    }
+  }
+
+  private showHitFeedback(): void {
+    this.crosshair.classList.remove('is-hit');
+    // Restart the short hit-confirm pulse even when attacks land in quick succession.
+    void this.crosshair.offsetWidth;
+    this.crosshair.classList.add('is-hit');
+    window.clearTimeout(this.hitFeedbackTimeout);
+    this.hitFeedbackTimeout = window.setTimeout(() => this.crosshair.classList.remove('is-hit'), 110);
   }
 
   private updateAimRay(): void {
@@ -1347,9 +1371,16 @@ export class Game {
 
   private onPlayerHealthChange = (event: Event): void => {
     const { health, maxHealth } = (event as CustomEvent<PlayerHealthChange>).detail;
+    const previousHealth = Number(this.playerHealthElements.track.getAttribute('aria-valuenow'));
     this.playerHealthElements.label.textContent = `Player: ${health} / ${maxHealth}`;
     this.playerHealthElements.track.setAttribute('aria-valuenow', String(health));
     this.playerHealthElements.fill.style.width = `${(health / maxHealth) * 100}%`;
+    if (health < previousHealth) {
+      const gameView = this.canvas.parentElement;
+      gameView?.classList.add('is-damaged');
+      window.clearTimeout(this.damageFlashTimeout);
+      this.damageFlashTimeout = window.setTimeout(() => gameView?.classList.remove('is-damaged'), 240);
+    }
     if (health === 0 && !this.gameOver) {
       this.gameOver = true;
       this.deathElapsed = 0;
@@ -1462,6 +1493,7 @@ export class Game {
     if (!this.paused || this.gameOver) return;
     this.paused = false;
     this.spawnProtectionMessage.hidden = true;
+    if (!this.animationFrame) this.animationFrame = requestAnimationFrame(this.animate);
   }
 
   private async requestPointerLock(): Promise<void> {
@@ -1787,9 +1819,13 @@ export class Game {
       this.updatePlayerProjectiles(delta);
       this.updateHostileMobs(delta);
     }
-    this.updateCrosshairTarget();
+    this.updateCrosshairTarget(delta);
     this.playerMixer?.update(delta);
     this.renderer.render(this.scene, this.camera);
+    if (this.paused && !this.gameOver) {
+      this.animationFrame = 0;
+      return;
+    }
     this.animationFrame = requestAnimationFrame(this.animate);
   };
 }
