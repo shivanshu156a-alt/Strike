@@ -1149,21 +1149,23 @@ export class Game {
       return;
     }
 
+    this.updateAimPointer();
     this.targetCheckElapsed -= delta;
     if (this.targetCheckElapsed <= 0) {
       this.targetCheckElapsed = 0.06;
-      this.updateAimRay();
       this.refreshTargetMeshes();
       this.raycaster.far = this.player.selectedAttack.attackRange;
       this.targetVisible = this.raycaster.intersectObjects(this.targetMeshes, false).length > 0;
     }
     this.crosshair.classList.toggle('is-targeted', this.targetVisible);
     this.crosshair.classList.toggle('is-floating-view', this.cameraView === 'floating');
+    this.worldAimMarkerMaterial.color.set(this.targetVisible ? 0xa6ffca : 0xffffff);
+  }
+
+  private updateAimPointer(): void {
+    this.updateAimRay();
     this.worldAimMarker.visible = this.cameraView === 'floating';
-    if (this.worldAimMarker.visible) {
-      this.worldAimMarker.position.copy(this.aimPoint);
-      this.worldAimMarkerMaterial.color.set(this.targetVisible ? 0xa6ffca : 0xffffff);
-    }
+    if (this.worldAimMarker.visible) this.worldAimMarker.position.copy(this.aimPoint);
   }
 
   private refreshTargetMeshes(): void {
@@ -1484,8 +1486,10 @@ export class Game {
       1.48,
     );
     this.requestTurnAnimation(yawChange);
-    if (this.cameraView === 'first-person') {
-      this.camera.rotation.set(this.pitch, this.yaw, this.cameraRoll);
+    this.camera.rotation.set(this.pitch, this.yaw, this.cameraRoll);
+    if (this.cameraView === 'floating') {
+      // Keep the world-space reticle in sync with the input event, not the next render tick.
+      this.updateAimPointer();
     }
   }
 
